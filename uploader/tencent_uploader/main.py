@@ -15,6 +15,7 @@ from conf import BASE_DIR, DEBUG_MODE, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.base_video import BaseVideoUploader
 from utils.base_social_media import set_init_script
 from utils.log import tencent_logger
+from utils.browser_runtime import open_browser_session
 
 TENCENT_LOGIN_URL = "https://channels.weixin.qq.com"
 TENCENT_UPLOAD_URL = "https://channels.weixin.qq.com/platform/post/create"
@@ -345,13 +346,18 @@ async def tencent_cookie_gen(
     poll_interval: int = 3,
     max_checks: int = 100,
     headless: bool = LOCAL_CHROME_HEADLESS,
+    cdp_url: str | None = None,
 ):
     account_file = _resolve_account_file(account_file)
     Path(account_file).parent.mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(**_build_launch_kwargs(headless=headless))
-        context = await browser.new_context()
+        session = await open_browser_session(
+            playwright,
+            cdp_url=cdp_url,
+            launch_kwargs=_build_launch_kwargs(headless=headless),
+        )
+        context = session.context
         qrcode_path = None
         result = _build_login_result(False, "failed", "视频号登录失败", account_file)
         try:
@@ -396,8 +402,7 @@ async def tencent_cookie_gen(
                 tencent_logger.info(_msg("🧹", f"临时二维码文件已清理: {qrcode_path}"))
             if not result["success"]:
                 tencent_logger.error(_msg("😢", f"登录失败: {result['message']}"))
-            await context.close()
-            await browser.close()
+            await session.close()
 
 
 async def tencent_setup(
@@ -406,6 +411,7 @@ async def tencent_setup(
     return_detail=False,
     qrcode_callback=None,
     headless: bool = LOCAL_CHROME_HEADLESS,
+    cdp_url: str | None = None,
 ):
     account_file = _resolve_account_file(account_file)
     if not os.path.exists(account_file) or not await cookie_auth(account_file):
@@ -414,7 +420,7 @@ async def tencent_setup(
             return result if return_detail else False
 
         tencent_logger.info(_msg("🥹", "cookie 失效了，准备打开浏览器重新登录"))
-        result = await tencent_cookie_gen(account_file, qrcode_callback=qrcode_callback, headless=headless)
+        result = await tencent_cookie_gen(account_file, qrcode_callback=qrcode_callback, headless=headless, cdp_url=cdp_url)
         return result if return_detail else result["success"]
 
     result = _build_login_result(True, "cookie_valid", "cookie有效", account_file)
@@ -449,6 +455,7 @@ class TencentBaseUploader(BaseVideoUploader):
         publish_strategy: str = TENCENT_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        cdp_url: str | None = None,
     ):
         self.publish_date = publish_date
         self.account_file = _resolve_account_file(account_file)
@@ -456,6 +463,7 @@ class TencentBaseUploader(BaseVideoUploader):
         self.debug = debug
         self.headless = headless
         self.local_executable_path = LOCAL_CHROME_PATH
+        self.cdp_url = cdp_url
 
     async def validate_base_args(self):
         if not os.path.exists(self.account_file):
@@ -734,6 +742,7 @@ class TencentVideo(TencentBaseUploader):
         publish_strategy: str = TENCENT_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        cdp_url: str | None = None,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -741,6 +750,7 @@ class TencentVideo(TencentBaseUploader):
             publish_strategy=publish_strategy,
             debug=debug,
             headless=headless,
+            cdp_url=cdp_url,
         )
         self.title = title
         self.file_path = file_path
@@ -883,8 +893,13 @@ class TencentVideo(TencentBaseUploader):
         await self.validate_upload_args()
         tencent_logger.info(_msg("🥳", "上传前检查通过"))
 
-        browser = await playwright.chromium.launch(**_build_launch_kwargs(headless=self.headless))
-        context = await browser.new_context(storage_state=self.account_file)
+        session = await open_browser_session(
+            playwright,
+            cdp_url=self.cdp_url,
+            launch_kwargs=_build_launch_kwargs(headless=self.headless),
+            context_kwargs={"storage_state": self.account_file},
+        )
+        context = session.context
 
         try:
             page = await context.new_page()
@@ -906,8 +921,7 @@ class TencentVideo(TencentBaseUploader):
             await context.storage_state(path=self.account_file)
             tencent_logger.success(_msg("🥳", "cookie 更新完毕"))
         finally:
-            await context.close()
-            await browser.close()
+            await session.close()
 
     async def tencent_upload_video(self):
         async with async_playwright() as playwright:
@@ -929,6 +943,7 @@ class TencentNote(TencentBaseUploader):
         publish_strategy: str = TENCENT_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        cdp_url: str | None = None,
         is_draft: bool = False,
     ):
         super().__init__(
@@ -937,6 +952,7 @@ class TencentNote(TencentBaseUploader):
             publish_strategy=publish_strategy,
             debug=debug,
             headless=headless,
+            cdp_url=cdp_url,
         )
         self.image_paths = image_paths
         self.note = note or ""
@@ -987,9 +1003,13 @@ class TencentNote(TencentBaseUploader):
         await self.validate_upload_args()
         tencent_logger.info(_msg("🥳", "图文上传前检查通过"))
 
-        browser = await playwright.chromium.launch(**_build_launch_kwargs(headless=self.headless))
-        context = await browser.new_context(storage_state=self.account_file)
-        context = await set_init_script(context)
+        session = await open_browser_session(
+            playwright,
+            cdp_url=self.cdp_url,
+            launch_kwargs=_build_launch_kwargs(headless=self.headless),
+            context_kwargs={"storage_state": self.account_file},
+        )
+        context = await set_init_script(session.context)
 
         try:
             page = await context.new_page()
@@ -1006,8 +1026,7 @@ class TencentNote(TencentBaseUploader):
             await context.storage_state(path=self.account_file)
             tencent_logger.success(_msg("🥳", "cookie 更新完毕"))
         finally:
-            await context.close()
-            await browser.close()
+            await session.close()
 
     async def tencent_upload_note(self):
         async with async_playwright() as playwright:

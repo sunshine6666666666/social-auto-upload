@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -66,6 +67,7 @@ class DouyinVideoUploadRequest:
     publish_strategy: str = DOUYIN_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    cdp_url: str | None = None
 
 
 @dataclass(slots=True)
@@ -79,6 +81,7 @@ class DouyinNoteUploadRequest:
     publish_strategy: str = DOUYIN_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    cdp_url: str | None = None
     bgm: str = ""
 
 
@@ -94,6 +97,7 @@ class KuaishouVideoUploadRequest:
     publish_strategy: str = KUAISHOU_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    cdp_url: str | None = None
 
 
 @dataclass(slots=True)
@@ -107,6 +111,7 @@ class KuaishouNoteUploadRequest:
     publish_strategy: str = KUAISHOU_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    cdp_url: str | None = None
 
 
 @dataclass(slots=True)
@@ -121,6 +126,8 @@ class XiaohongshuVideoUploadRequest:
     publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    cdp_url: str | None = None
+    submit: bool = True
 
 
 @dataclass(slots=True)
@@ -134,6 +141,7 @@ class XiaohongshuNoteUploadRequest:
     publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    cdp_url: str | None = None
 
 
 @dataclass(slots=True)
@@ -166,6 +174,7 @@ class TencentVideoUploadRequest:
     publish_strategy: str = TENCENT_PUBLISH_STRATEGY_IMMEDIATE
     debug: bool = True
     headless: bool = True
+    cdp_url: str | None = None
 
 
 @dataclass(slots=True)
@@ -180,6 +189,7 @@ class YouTubeVideoUploadRequest:
     visibility: str = "public"
     debug: bool = True
     headless: bool = False
+    cdp_url: str | None = None
 
 
 def has_interactive_terminal() -> bool:
@@ -218,9 +228,9 @@ def parse_schedule(raw_schedule: str | None) -> datetime | int:
     return datetime.strptime(raw_schedule, SCHEDULE_FORMAT)
 
 
-async def login_douyin_account(account_name: str, headless: bool = True) -> dict:
+async def login_douyin_account(account_name: str, headless: bool = True, cdp_url: str | None = None) -> dict:
     account_file = resolve_account_file("douyin", account_name)
-    return await douyin_setup(str(account_file), handle=True, return_detail=True, headless=headless)
+    return await douyin_setup(str(account_file), handle=True, return_detail=True, headless=headless, cdp_url=cdp_url)
 
 
 async def check_douyin_account(account_name: str) -> bool:
@@ -230,9 +240,9 @@ async def check_douyin_account(account_name: str) -> bool:
     return await douyin_cookie_auth(str(account_file))
 
 
-async def login_kuaishou_account(account_name: str, headless: bool = True) -> dict:
+async def login_kuaishou_account(account_name: str, headless: bool = True, cdp_url: str | None = None) -> dict:
     account_file = resolve_account_file("kuaishou", account_name)
-    return await ks_setup(str(account_file), handle=True, return_detail=True, headless=headless)
+    return await ks_setup(str(account_file), handle=True, return_detail=True, headless=headless, cdp_url=cdp_url)
 
 
 async def check_kuaishou_account(account_name: str) -> bool:
@@ -242,16 +252,16 @@ async def check_kuaishou_account(account_name: str) -> bool:
     return await kuaishou_cookie_auth(str(account_file))
 
 
-async def login_xiaohongshu_account(account_name: str, headless: bool = True) -> dict:
+async def login_xiaohongshu_account(account_name: str, headless: bool = True, cdp_url: str | None = None) -> dict:
     account_file = resolve_account_file("xiaohongshu", account_name)
-    return await xiaohongshu_setup(str(account_file), handle=True, return_detail=True, headless=headless)
+    return await xiaohongshu_setup(str(account_file), handle=True, return_detail=True, headless=headless, cdp_url=cdp_url)
 
 
-async def check_xiaohongshu_account(account_name: str) -> bool:
+async def check_xiaohongshu_account(account_name: str, cdp_url: str | None = None) -> bool:
     account_file = resolve_account_file("xiaohongshu", account_name)
     if not account_file.exists():
         return False
-    return await xiaohongshu_cookie_auth(str(account_file))
+    return await xiaohongshu_cookie_auth(str(account_file), cdp_url=cdp_url)
 
 
 async def login_bilibili_account(account_name: str) -> dict:
@@ -327,6 +337,7 @@ async def upload_youtube_video(request: YouTubeVideoUploadRequest) -> Path:
         visibility=request.visibility,
         debug=request.debug,
         headless=request.headless,
+        cdp_url=request.cdp_url,
     )
     await app.main()
     return account_file
@@ -358,6 +369,7 @@ async def upload_video(request: DouyinVideoUploadRequest) -> Path:
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        cdp_url=request.cdp_url,
     )
     await app.douyin_upload_video()
     return account_file
@@ -381,6 +393,7 @@ async def upload_note(request: DouyinNoteUploadRequest) -> Path:
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        cdp_url=request.cdp_url,
         bgm=request.bgm,
     )
     await app.douyin_upload_note()
@@ -406,6 +419,7 @@ async def upload_kuaishou_video(request: KuaishouVideoUploadRequest) -> Path:
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        cdp_url=request.cdp_url,
     )
     await app.main()
     return account_file
@@ -429,6 +443,7 @@ async def upload_kuaishou_note(request: KuaishouNoteUploadRequest) -> Path:
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        cdp_url=request.cdp_url,
     )
     await app.main()
     return account_file
@@ -436,7 +451,7 @@ async def upload_kuaishou_note(request: KuaishouNoteUploadRequest) -> Path:
 
 async def upload_xiaohongshu_video(request: XiaohongshuVideoUploadRequest) -> Path:
     account_file = resolve_account_file("xiaohongshu", request.account_name)
-    is_ready = await xiaohongshu_setup(str(account_file), handle=False)
+    is_ready = await xiaohongshu_setup(str(account_file), handle=False, cdp_url=request.cdp_url)
     if not is_ready:
         raise RuntimeError(
             f"Xiaohongshu cookie is missing or expired: {account_file}. Run `sau xiaohongshu login --account {request.account_name}` first."
@@ -453,6 +468,8 @@ async def upload_xiaohongshu_video(request: XiaohongshuVideoUploadRequest) -> Pa
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        cdp_url=request.cdp_url,
+        submit=request.submit,
     )
     await app.main()
     return account_file
@@ -477,6 +494,7 @@ async def upload_xiaohongshu_note(request: XiaohongshuNoteUploadRequest) -> Path
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        cdp_url=request.cdp_url,
     )
     await app.main()
     return account_file
@@ -571,6 +589,11 @@ def add_runtime_flags(parser: argparse.ArgumentParser) -> None:
     headless_group = parser.add_mutually_exclusive_group()
     headless_group.add_argument("--headed", dest="headless", action="store_false", help="Run with browser UI")
     headless_group.add_argument("--headless", dest="headless", action="store_true", help="Run in headless mode")
+    parser.add_argument(
+        "--cdp-url",
+        default=os.environ.get("SAU_CDP_URL"),
+        help="Connect to an existing Agent Chrome/Chromium over CDP, e.g. http://127.0.0.1:9223",
+    )
     parser.set_defaults(headless=True)
 
 
@@ -661,6 +684,7 @@ def build_parser() -> argparse.ArgumentParser:
     xiaohongshu_upload_video_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
     xiaohongshu_upload_video_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
     xiaohongshu_upload_video_parser.add_argument("--thumbnail", type=existing_file_path, help="Optional thumbnail path")
+    xiaohongshu_upload_video_parser.add_argument("--no-submit", action="store_true", help="Fill/upload and stop before clicking publish; for smoke tests")
     add_runtime_flags(xiaohongshu_upload_video_parser)
 
     xiaohongshu_upload_note_parser = xiaohongshu_actions.add_parser("upload-note", help="Upload one note to Xiaohongshu")
@@ -744,7 +768,7 @@ def build_parser() -> argparse.ArgumentParser:
 async def dispatch(args: argparse.Namespace) -> int:
     if args.platform == "douyin":
         if args.action == "login":
-            result = await login_douyin_account(args.account, headless=args.headless)
+            result = await login_douyin_account(args.account, headless=args.headless, cdp_url=getattr(args, "cdp_url", None))
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Douyin login flow completed: {result['account_file']}")
@@ -773,6 +797,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
+                cdp_url=getattr(args, "cdp_url", None),
             )
             await upload_video(request)
             print(f"Douyin video upload submitted: {request.video_file}")
@@ -798,6 +823,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
+                cdp_url=getattr(args, "cdp_url", None),
                 bgm=args.bgm or "",
             )
             await upload_note(request)
@@ -808,7 +834,7 @@ async def dispatch(args: argparse.Namespace) -> int:
 
     if args.platform == "kuaishou":
         if args.action == "login":
-            result = await login_kuaishou_account(args.account, headless=args.headless)
+            result = await login_kuaishou_account(args.account, headless=args.headless, cdp_url=getattr(args, "cdp_url", None))
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Kuaishou login flow completed: {result['account_file']}")
@@ -833,6 +859,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
+                cdp_url=getattr(args, "cdp_url", None),
             )
             await upload_kuaishou_video(request)
             print(f"Kuaishou video upload submitted: {request.video_file}")
@@ -849,6 +876,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
+                cdp_url=getattr(args, "cdp_url", None),
             )
             await upload_kuaishou_note(request)
             print(f"Kuaishou note upload submitted: {len(request.image_files)} images")
@@ -858,14 +886,14 @@ async def dispatch(args: argparse.Namespace) -> int:
 
     if args.platform == "xiaohongshu":
         if args.action == "login":
-            result = await login_xiaohongshu_account(args.account, headless=args.headless)
+            result = await login_xiaohongshu_account(args.account, headless=args.headless, cdp_url=getattr(args, "cdp_url", None))
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Xiaohongshu login flow completed: {result['account_file']}")
             return 0
 
         if args.action == "check":
-            is_valid = await check_xiaohongshu_account(args.account)
+            is_valid = await check_xiaohongshu_account(args.account, cdp_url=getattr(args, "cdp_url", None) or os.environ.get("SAU_CDP_URL"))
             print("valid" if is_valid else "invalid")
             return 0 if is_valid else 1
 
@@ -889,9 +917,12 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
+                cdp_url=getattr(args, "cdp_url", None),
+                submit=not getattr(args, "no_submit", False),
             )
             await upload_xiaohongshu_video(request)
-            print(f"Xiaohongshu video upload submitted: {request.video_file}")
+            action_label = "submitted" if request.submit else "prepared without submit"
+            print(f"Xiaohongshu video upload {action_label}: {request.video_file}")
             return 0
 
         if args.action == "upload-note":
@@ -909,6 +940,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
+                cdp_url=getattr(args, "cdp_url", None),
             )
             await upload_xiaohongshu_note(request)
             print(f"Xiaohongshu note upload submitted: {len(request.image_files)} images")
@@ -979,6 +1011,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_strategy=publish_strategy,
                 debug=args.debug,
                 headless=args.headless,
+                cdp_url=getattr(args, "cdp_url", None),
             )
             await upload_tencent_video(request)
             print(f"Tencent/WeChat Channels video upload submitted: {request.video_file}")
@@ -1011,6 +1044,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 visibility=args.visibility,
                 debug=args.debug,
                 headless=args.headless,
+                cdp_url=getattr(args, "cdp_url", None),
             )
             await upload_youtube_video(request)
             print(f"YouTube video upload submitted: {request.video_file}")

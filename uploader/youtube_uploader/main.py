@@ -20,6 +20,7 @@ from conf import DEBUG_MODE
 from uploader.base_video import BaseVideoUploader
 from utils.base_social_media import set_init_script
 from utils.log import youtube_logger
+from utils.browser_runtime import open_browser_session
 
 try:
     # 国内直连 youtube.com 会超时，且 patchright 启的 chromium 不吃系统代理。
@@ -185,7 +186,7 @@ async def _wait_upload_complete(page: Page, max_polls: int = 360) -> bool:
 class YouTubeVideo(BaseVideoUploader):
     def __init__(self, title, file_path, tags, account_file, *,
                  description="", thumbnail_path=None, playlist=None,
-                 visibility="public", debug=DEBUG_MODE, headless=False):
+                 visibility="public", debug=DEBUG_MODE, headless=False, cdp_url: str | None = None):
         self.title = title
         self.file_path = str(file_path)
         self.tags = tags or []
@@ -196,14 +197,20 @@ class YouTubeVideo(BaseVideoUploader):
         self.visibility = visibility if visibility in VISIBILITY else "public"
         self.debug = debug
         self.headless = headless
+        self.cdp_url = cdp_url
 
     async def upload(self, playwright: Playwright) -> None:
-        browser = await playwright.chromium.launch(
-            headless=self.headless, channel="chrome",
-            proxy={"server": YT_PROXY} if YT_PROXY else None,
+        session = await open_browser_session(
+            playwright,
+            cdp_url=self.cdp_url,
+            launch_kwargs={
+                "headless": self.headless,
+                "channel": "chrome",
+                "proxy": {"server": YT_PROXY} if YT_PROXY else None,
+            },
+            context_kwargs={"storage_state": self.account_file},
         )
-        context = await browser.new_context(storage_state=self.account_file)
-        context = await set_init_script(context)
+        context = await set_init_script(session.context)
         page = await context.new_page()
         page.set_default_timeout(60000)
 
@@ -211,7 +218,7 @@ class YouTubeVideo(BaseVideoUploader):
         await page.goto(UPLOAD_URL, wait_until="domcontentloaded")
         await page.wait_for_timeout(3000)
         if "accounts.google.com" in page.url or "signin" in page.url.lower():
-            await browser.close()
+            await session.close()
             raise RuntimeError("YouTube 登录态失效，请重新执行 login")
 
         # 1) 选择视频文件
@@ -326,7 +333,7 @@ class YouTubeVideo(BaseVideoUploader):
         except Exception:
             pass
         await page.wait_for_timeout(2000)
-        await browser.close()
+        await session.close()
 
     async def main(self):
         async with async_playwright() as playwright:

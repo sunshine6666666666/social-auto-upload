@@ -19,6 +19,7 @@ from utils.login_qrcode import print_terminal_qrcode
 from utils.login_qrcode import remove_qrcode_file
 from utils.login_qrcode import save_data_url_image
 from utils.log import douyin_logger
+from utils.browser_runtime import open_browser_session
 
 DOUYIN_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 DOUYIN_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
@@ -267,6 +268,7 @@ class DouYinBaseUploader(BaseVideoUploader):
         publish_strategy: str = DOUYIN_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        cdp_url: str | None = None,
     ):
         self.publish_date = publish_date
         self.account_file = account_file
@@ -275,6 +277,7 @@ class DouYinBaseUploader(BaseVideoUploader):
         self.date_format = "%Y年%m月%d日 %H:%M"
         self.local_executable_path = LOCAL_CHROME_PATH
         self.headless = headless
+        self.cdp_url = cdp_url
 
     async def validate_base_args(self):
         if not os.path.exists(self.account_file):
@@ -515,6 +518,7 @@ class DouYinVideo(DouYinBaseUploader):
         publish_strategy: str = DOUYIN_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        cdp_url: str | None = None,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -522,6 +526,7 @@ class DouYinVideo(DouYinBaseUploader):
             publish_strategy=publish_strategy,
             debug=debug,
             headless=headless,
+            cdp_url=cdp_url,
         )
         self.title = title
         self.file_path = file_path
@@ -619,12 +624,13 @@ class DouYinVideo(DouYinBaseUploader):
         await self.validate_upload_args()
         douyin_logger.info(_msg("🥳", "上传前检查通过"))
 
-        browser = await playwright.chromium.launch(headless=self.headless, channel="chromium")
-        context = await browser.new_context(
-            storage_state=f"{self.account_file}",
-            permissions=["geolocation"],
+        session = await open_browser_session(
+            playwright,
+            cdp_url=self.cdp_url,
+            launch_kwargs={"headless": self.headless, "channel": "chromium"},
+            context_kwargs={"storage_state": f"{self.account_file}", "permissions": ["geolocation"]},
         )
-        context = await set_init_script(context)
+        context = await set_init_script(session.context)
 
         page = await context.new_page()
         await page.goto("https://creator.douyin.com/creator-micro/content/upload", wait_until="domcontentloaded", timeout=90000)
@@ -717,8 +723,7 @@ class DouYinVideo(DouYinBaseUploader):
         await context.storage_state(path=self.account_file)
         douyin_logger.success(_msg("🥳", "cookie 更新完毕"))
         await asyncio.sleep(2)
-        await context.close()
-        await browser.close()
+        await session.close()
 
     async def douyin_upload_video(self):
         async with async_playwright() as playwright:
@@ -740,6 +745,7 @@ class DouYinNote(DouYinBaseUploader):
         publish_strategy: str = DOUYIN_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        cdp_url: str | None = None,
         bgm: str = "",
     ):
         super().__init__(
@@ -748,6 +754,7 @@ class DouYinNote(DouYinBaseUploader):
             publish_strategy=publish_strategy,
             debug=debug,
             headless=headless,
+            cdp_url=cdp_url,
         )
         self.image_paths = image_paths
         self.note = note or ""
@@ -837,12 +844,13 @@ class DouYinNote(DouYinBaseUploader):
         await self.validate_upload_args()
         douyin_logger.info(_msg("🥳", "图文上传前检查通过"))
 
-        browser = await playwright.chromium.launch(headless=self.headless, channel="chromium")
-        context = await browser.new_context(
-            storage_state=f"{self.account_file}",
-            permissions=["geolocation"],
+        session = await open_browser_session(
+            playwright,
+            cdp_url=self.cdp_url,
+            launch_kwargs={"headless": self.headless, "channel": "chromium"},
+            context_kwargs={"storage_state": f"{self.account_file}", "permissions": ["geolocation"]},
         )
-        context = await set_init_script(context)
+        context = await set_init_script(session.context)
 
         upload_success = False
         try:
@@ -858,8 +866,7 @@ class DouYinNote(DouYinBaseUploader):
                 await context.storage_state(path=self.account_file)
                 douyin_logger.success(_msg("🥳", "cookie 更新完毕"))
                 await asyncio.sleep(2)
-            await context.close()
-            await browser.close()
+            await session.close()
 
     async def douyin_upload_note(self):
         async with async_playwright() as playwright:

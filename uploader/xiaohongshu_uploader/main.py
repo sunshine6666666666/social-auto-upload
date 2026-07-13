@@ -20,6 +20,7 @@ from utils.login_qrcode import print_terminal_qrcode
 from utils.login_qrcode import remove_qrcode_file
 from utils.login_qrcode import save_data_url_image
 from utils.log import xiaohongshu_logger
+from utils.browser_runtime import open_browser_session
 
 XHS_DEFAULT_CREATOR_BASE_URL = "https://creator.xiaohongshu.com"
 XHS_CREATOR_BASE_URL_ENV = "SAU_XHS_CREATOR_BASE_URL"
@@ -154,17 +155,28 @@ async def _is_xhs_login_completed(page: Page) -> bool:
         return True
 
 
-async def cookie_auth(account_file):
+async def cookie_auth(account_file, cdp_url: str | None = None):
     if not os.path.exists(account_file):
         return False
 
     async with async_playwright() as playwright:
-        if LOCAL_CHROME_PATH:
-            browser = await playwright.chromium.launch(headless=True, executable_path=LOCAL_CHROME_PATH)
+        browser = None
+        if cdp_url:
+            session = await open_browser_session(
+                playwright,
+                cdp_url=cdp_url,
+                context_kwargs={"storage_state": account_file},
+                use_existing_context=False,
+            )
+            context = session.context
         else:
-            browser = await playwright.chromium.launch(headless=True, channel="chromium")
-        try:
+            if LOCAL_CHROME_PATH:
+                browser = await playwright.chromium.launch(headless=True, executable_path=LOCAL_CHROME_PATH)
+            else:
+                browser = await playwright.chromium.launch(headless=True, channel="chromium")
             context = await browser.new_context(storage_state=account_file)
+            session = None
+        try:
             context = await set_init_script(context)
             page = await context.new_page()
             await page.goto(
@@ -193,7 +205,11 @@ async def cookie_auth(account_file):
             xiaohongshu_logger.warning(_msg("😵", f"cookie 校验时出错，按失效处理: {exc}"))
             return False
         finally:
-            await browser.close()
+            if session is not None:
+                await session.close()
+            else:
+                assert browser is not None
+                await browser.close()
 
 
 async def xiaohongshu_setup(
@@ -202,8 +218,9 @@ async def xiaohongshu_setup(
     return_detail=False,
     qrcode_callback=None,
     headless: bool = LOCAL_CHROME_HEADLESS,
+    cdp_url: str | None = None,
 ):
-    if not os.path.exists(account_file) or not await cookie_auth(account_file):
+    if not os.path.exists(account_file) or not await cookie_auth(account_file, cdp_url=cdp_url):
         if not handle:
             result = _build_login_result(False, "cookie_invalid", "cookie文件不存在或已失效", account_file)
             return result if return_detail else False
@@ -212,6 +229,7 @@ async def xiaohongshu_setup(
             account_file,
             qrcode_callback=qrcode_callback,
             headless=headless,
+            cdp_url=cdp_url,
         )
         return result if return_detail else result["success"]
 
@@ -225,17 +243,21 @@ async def xiaohongshu_cookie_gen(
     poll_interval: int = 3,
     max_checks: int = 100,
     headless: bool = LOCAL_CHROME_HEADLESS,
+    cdp_url: str | None = None,
 ):
-    if headless:
+    if headless and not cdp_url:
         xiaohongshu_logger.info(_msg("🖼️", "小红书登录将以无头模式运行，小人会输出终端二维码并保存本地二维码图片"))
 
     account_path = Path(account_file)
     account_path.parent.mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless, channel="chromium")
-        context = await browser.new_context()
-        context = await set_init_script(context)
+        session = await open_browser_session(
+            playwright,
+            cdp_url=cdp_url,
+            launch_kwargs={"headless": headless, "channel": "chromium"},
+        )
+        context = await set_init_script(session.context)
         qrcode_path = None
         qrcode_info = None
         result = _build_login_result(False, "failed", "小红书登录失败", account_file)
@@ -281,8 +303,7 @@ async def xiaohongshu_cookie_gen(
                 xiaohongshu_logger.info(_msg("🧹", f"临时二维码文件已清理: {qrcode_path}"))
             if not result["success"]:
                 xiaohongshu_logger.error(_msg("😢", f"登录失败: {result['message']}"))
-            await context.close()
-            await browser.close()
+            await session.close()
         return result
 
 
@@ -294,6 +315,8 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        cdp_url: str | None = None,
+        submit: bool = True,
     ):
         self.publish_date = publish_date
         self.account_file = str(account_file)
@@ -302,11 +325,12 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         self.date_format = "%Y年%m月%d日 %H:%M"
         self.local_executable_path = LOCAL_CHROME_PATH
         self.headless = headless
+        self.cdp_url = cdp_url
 
     async def validate_base_args(self):
         if not os.path.exists(self.account_file):
             raise RuntimeError(f"cookie文件不存在，请先完成小红书登录: {self.account_file}")
-        if not await cookie_auth(self.account_file):
+        if not await cookie_auth(self.account_file, cdp_url=self.cdp_url):
             raise RuntimeError(f"cookie文件已失效，请先完成小红书登录: {self.account_file}")
 
         if self.publish_strategy not in {
@@ -481,6 +505,8 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        cdp_url: str | None = None,
+        submit: bool = True,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -488,12 +514,14 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
             publish_strategy=publish_strategy,
             debug=debug,
             headless=headless,
+            cdp_url=cdp_url,
         )
         self.title = title
         self.file_path = file_path
         self.tags = tags or []
         self.thumbnail_path = thumbnail_path
         self.desc = desc or ""
+        self.submit = submit
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -597,6 +625,10 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time_xiaohongshu(page, self.publish_date)
 
+        if not self.submit:
+            xiaohongshu_logger.success(_msg("🧪", "冒烟模式已完成：素材、标题、描述、话题和定时信息已填好，未点击发布按钮"))
+            return
+
         while True:
             try:
                 if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED:
@@ -619,12 +651,13 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
         xiaohongshu_logger.info(_msg("🧍", "小人先检查 cookie、视频文件、封面和发布时间"))
         await self.validate_upload_args()
         xiaohongshu_logger.info(_msg("🥳", "上传前检查通过"))
-        browser = await playwright.chromium.launch(headless=self.headless, channel="chromium")
-        context = await browser.new_context(
-            permissions=["geolocation"],
-            storage_state=self.account_file,
+        session = await open_browser_session(
+            playwright,
+            cdp_url=self.cdp_url,
+            launch_kwargs={"headless": self.headless, "channel": "chromium"},
+            context_kwargs={"permissions": ["geolocation"], "storage_state": self.account_file},
         )
-        context = await set_init_script(context)
+        context = await set_init_script(session.context)
 
         try:
             page = await context.new_page()
@@ -632,8 +665,7 @@ class XiaoHongShuVideo(XiaoHongShuBaseUploader):
             await context.storage_state(path=self.account_file)
             xiaohongshu_logger.success(_msg("🥳", "cookie 更新完毕"))
         finally:
-            await context.close()
-            await browser.close()
+            await session.close()
 
     async def xiaohongshu_upload_video(self):
         async with async_playwright() as playwright:
@@ -656,6 +688,7 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        cdp_url: str | None = None,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -663,6 +696,7 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
             publish_strategy=publish_strategy,
             debug=debug,
             headless=headless,
+            cdp_url=cdp_url,
         )
         self.image_paths = image_paths
         self.note = note or ""
@@ -742,12 +776,13 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         xiaohongshu_logger.info(_msg("🧍", "小人先检查 cookie、图片和发布时间"))
         await self.validate_upload_args()
         xiaohongshu_logger.info(_msg("🥳", "图文上传前检查通过"))
-        browser = await playwright.chromium.launch(headless=self.headless, channel="chromium")
-        context = await browser.new_context(
-            permissions=["geolocation"],
-            storage_state=self.account_file,
+        session = await open_browser_session(
+            playwright,
+            cdp_url=self.cdp_url,
+            launch_kwargs={"headless": self.headless, "channel": "chromium"},
+            context_kwargs={"permissions": ["geolocation"], "storage_state": self.account_file},
         )
-        context = await set_init_script(context)
+        context = await set_init_script(session.context)
 
         try:
             page = await context.new_page()
@@ -755,8 +790,7 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
             await context.storage_state(path=self.account_file)
             xiaohongshu_logger.success(_msg("🥳", "cookie 更新完毕"))
         finally:
-            await context.close()
-            await browser.close()
+            await session.close()
 
     async def xiaohongshu_upload_note(self):
         async with async_playwright() as playwright:

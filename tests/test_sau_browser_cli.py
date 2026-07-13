@@ -142,6 +142,30 @@ class BrowserCliParserTests(unittest.TestCase):
             )
 
         self.assertTrue(args.headless)
+        self.assertIsNone(args.cdp_url)
+
+    def test_douyin_upload_video_accepts_agent_chrome_cdp_url(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = Path(tmp_dir) / "demo.mp4"
+            video_path.write_bytes(b"video")
+
+            parser = sau_cli.build_parser()
+            args = parser.parse_args(
+                [
+                    "douyin",
+                    "upload-video",
+                    "--account",
+                    "creator",
+                    "--file",
+                    str(video_path),
+                    "--title",
+                    "视频标题",
+                    "--cdp-url",
+                    "http://127.0.0.1:9223",
+                ]
+            )
+
+        self.assertEqual(args.cdp_url, "http://127.0.0.1:9223")
 
     def test_xiaohongshu_upload_note_accepts_headed(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -183,8 +207,10 @@ class BrowserCliDispatchTests(unittest.TestCase):
             images=[Path("1.png")],
             title="图文标题",
             note="图文正文",
+            notef="",
             tags="测试,图文",
             schedule=0,
+            bgm="",
             debug=False,
             headless=True,
         )
@@ -259,6 +285,7 @@ class BrowserCliDispatchTests(unittest.TestCase):
             thumbnail=None,
             debug=False,
             headless=False,
+            cdp_url="http://127.0.0.1:9223",
         )
         with patch("sau_cli.upload_xiaohongshu_video", new=AsyncMock()) as mock_upload:
             asyncio.run(sau_cli.dispatch(args))
@@ -267,6 +294,7 @@ class BrowserCliDispatchTests(unittest.TestCase):
         self.assertEqual(request.title, "视频标题")
         self.assertEqual(request.description, "视频简介")
         self.assertFalse(request.headless)
+        self.assertEqual(request.cdp_url, "http://127.0.0.1:9223")
 
     def test_dispatch_xiaohongshu_upload_note_uses_headless_request(self):
         args = Namespace(
