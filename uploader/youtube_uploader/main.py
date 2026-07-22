@@ -12,7 +12,10 @@ Login is interactive (Google account, no QR code): the browser opens, the user s
 the storage_state is saved. Reuse it afterwards for fully unattended uploads.
 """
 import asyncio
+import re
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from patchright.async_api import Page, Playwright, async_playwright
 
@@ -36,6 +39,46 @@ VISIBILITY = {"public": "PUBLIC", "unlisted": "UNLISTED", "private": "PRIVATE"}
 
 def _msg(emoji: str, text: str) -> str:
     return f"{emoji} {text}"
+
+
+def _normalize_schedule(expected_schedule: datetime, timezone: str) -> datetime:
+    zone = ZoneInfo(timezone)
+    if expected_schedule.tzinfo is None:
+        return expected_schedule.replace(tzinfo=zone)
+    return expected_schedule.astimezone(zone)
+
+
+def parse_scheduled_publish_readback(
+    html: str, *, expected_schedule: datetime, timezone: str
+) -> dict[str, str | int]:
+    """Read Studio's embedded CreatorVideoData and reject incomplete/mismatched scheduling evidence."""
+    payload = html.replace(r'\"', '"')
+    video_match = re.search(r'"entity_id"\s*:\s*"([^"\\]+)"', payload)
+    seconds_match = re.search(r'"scheduledTimeSeconds"\s*:\s*"?(\d+)"?', payload)
+    if not video_match:
+        raise RuntimeError("YouTube Studio readback did not include a video ID")
+    if not seconds_match:
+        raise RuntimeError("YouTube Studio readback did not include scheduledTimeSeconds")
+    if "SCHEDULED_PUBLISHING_STATUS_SCHEDULED" not in payload:
+        raise RuntimeError("YouTube Studio readback did not confirm scheduled visibility")
+
+    scheduled_seconds = int(seconds_match.group(1))
+    actual = datetime.fromtimestamp(scheduled_seconds, tz=ZoneInfo(timezone))
+    expected = _normalize_schedule(expected_schedule, timezone)
+    if actual != expected:
+        raise RuntimeError(
+            f"YouTube Studio scheduled time {actual.isoformat()} does not match requested {expected.isoformat()}"
+        )
+
+    video_id = video_match.group(1)
+    return {
+        "videoId": video_id,
+        "publishUrl": f"https://www.youtube.com/watch?v={video_id}",
+        "visibility": "scheduled",
+        "scheduledTimeSeconds": scheduled_seconds,
+        "scheduledAt": actual.isoformat(),
+        "timezone": timezone,
+    }
 
 
 def _build_login_result(success, status, message, account_file, current_url=""):
@@ -197,11 +240,34 @@ async def _wait_upload_complete(page: Page, max_polls: int = 360) -> bool:
     return False
 
 
+async def _configure_scheduled_publication(page: Page, schedule: datetime, timezone: str) -> None:
+    local_time = _normalize_schedule(schedule, timezone)
+    if local_time <= datetime.now(ZoneInfo(timezone)):
+        raise ValueError(f"YouTube scheduled time must be in the future: {local_time.isoformat()}")
+
+    if not await _click_if_present(
+        page, "#schedule-button, ytcp-button:has-text('Schedule'), ytcp-button:has-text('安排时间')", 10000
+    ):
+        raise RuntimeError("YouTube Studio did not expose the schedule controls")
+
+    date_input = page.locator(
+        "#schedule-date-picker input, input[aria-label*='Date'], input[aria-label*='日期']"
+    ).first
+    time_input = page.locator(
+        "#schedule-time-picker input, input[aria-label*='Time'], input[aria-label*='时间']"
+    ).first
+    await date_input.wait_for(state="visible", timeout=10000)
+    await time_input.wait_for(state="visible", timeout=10000)
+    await date_input.fill(local_time.strftime("%m/%d/%Y"))
+    await time_input.fill(local_time.strftime("%H:%M"))
+    youtube_logger.info(_msg("🗓️", f"设置 Studio 原生预约: {local_time.isoformat()}"))
+
+
 class YouTubeVideo(BaseVideoUploader):
     def __init__(self, title, file_path, tags, account_file, *,
                  description="", thumbnail_path=None, playlist=None,
                  visibility="public", debug=DEBUG_MODE, headless=False, cdp_url: str | None = None,
-                 submit: bool = True):
+                 submit: bool = True, schedule: datetime | None = None, timezone: str = "Asia/Shanghai"):
         self.title = title
         self.file_path = str(file_path)
         self.tags = tags or []
@@ -214,8 +280,10 @@ class YouTubeVideo(BaseVideoUploader):
         self.headless = headless
         self.cdp_url = cdp_url
         self.submit = submit
+        self.schedule = schedule
+        self.timezone = timezone
 
-    async def upload(self, playwright: Playwright) -> None:
+    async def upload(self, playwright: Playwright) -> dict[str, str | int | bool]:
         session = await open_browser_session(
             playwright,
             cdp_url=self.cdp_url,
@@ -319,6 +387,8 @@ class YouTubeVideo(BaseVideoUploader):
             await page.wait_for_timeout(1000)
 
         # 10) 可见性
+        if self.schedule:
+            self.visibility = "public"
         youtube_logger.info(_msg("🌐", f"设置可见性 = {self.visibility}"))
         await _click_if_present(page, f"tp-yt-paper-radio-button[name='{VISIBILITY[self.visibility]}']", 10000)
 
@@ -327,9 +397,20 @@ class YouTubeVideo(BaseVideoUploader):
         youtube_logger.info(_msg("📤", "等待上传完成（传完才发布）…"))
         await _wait_upload_complete(page)
 
-        # 11) 发布
+        # 11) 发布 / Studio 原生预约
+        result: dict[str, str | int | bool] = {"visibility": self.visibility, "submitted": self.submit}
         if not self.submit:
             youtube_logger.success(_msg("🛑", "已到达发布前页面，按 --no-submit 停止"))
+        elif self.schedule:
+            await _configure_scheduled_publication(page, self.schedule, self.timezone)
+            if not await _click_if_present(page, "#done-button", 15000):
+                raise RuntimeError("YouTube Studio did not expose the final Schedule button")
+            await page.wait_for_timeout(4000)
+            result = parse_scheduled_publish_readback(
+                await page.content(), expected_schedule=self.schedule, timezone=self.timezone
+            )
+            youtube_logger.success(_msg("🗓️", f"Studio 原生预约已核验: {result['publishUrl']}"))
+            await _click_if_present(page, "ytcp-button:has-text('Close'), ytcp-button:has-text('关闭'), #close-button", 8000)
         else:
             await page.wait_for_timeout(1200)
             if not await _click_if_present(page, "#done-button", 15000):
@@ -343,6 +424,7 @@ class YouTubeVideo(BaseVideoUploader):
                         video_url = await link.get_attribute("href") or ""
                 except Exception:
                     pass
+                result["publishUrl"] = video_url
                 await _click_if_present(page, "ytcp-button:has-text('Close'), ytcp-button:has-text('关闭'), #close-button", 8000)
                 youtube_logger.success(_msg("🥳", f"发布完成（{self.visibility}）{(' ' + video_url) if video_url else ''}"))
 
@@ -353,7 +435,8 @@ class YouTubeVideo(BaseVideoUploader):
             pass
         await page.wait_for_timeout(2000)
         await session.close()
+        return result
 
     async def main(self):
         async with async_playwright() as playwright:
-            await self.upload(playwright)
+            return await self.upload(playwright)

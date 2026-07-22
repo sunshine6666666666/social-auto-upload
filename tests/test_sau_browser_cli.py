@@ -2,6 +2,7 @@ import asyncio
 import tempfile
 import unittest
 from argparse import Namespace
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -364,6 +365,51 @@ class YouTubeAgentChromeCliTests(unittest.TestCase):
             asyncio.run(sau_cli.upload_youtube_video(request))
 
         self.assertFalse(mock_app.call_args.kwargs["submit"])
+
+
+class YouTubeScheduleCliTests(unittest.TestCase):
+    def test_youtube_upload_accepts_schedule_and_explicit_timezone(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = Path(tmp_dir) / "demo.mp4"
+            video_path.write_bytes(b"video")
+            args = sau_cli.build_parser().parse_args(
+                [
+                    "youtube", "upload-video", "--account", "watermelon",
+                    "--file", str(video_path), "--title", "scheduled smoke",
+                    "--schedule", "2099-08-02 06:00", "--timezone", "Asia/Shanghai",
+                ]
+            )
+
+        self.assertEqual(args.schedule, datetime(2099, 8, 2, 6, 0))
+        self.assertEqual(args.timezone, "Asia/Shanghai")
+
+    def test_youtube_schedule_and_no_submit_are_mutually_exclusive(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = Path(tmp_dir) / "demo.mp4"
+            video_path.write_bytes(b"video")
+            with self.assertRaises(SystemExit):
+                sau_cli.build_parser().parse_args(
+                    [
+                        "youtube", "upload-video", "--account", "watermelon",
+                        "--file", str(video_path), "--title", "scheduled smoke",
+                        "--schedule", "2099-08-02 06:00", "--no-submit",
+                    ]
+                )
+
+    def test_dispatch_youtube_schedule_passes_request_fields(self):
+        args = Namespace(
+            platform="youtube", action="upload-video", account="watermelon",
+            file=Path("demo.mp4"), title="scheduled smoke", desc="", tags="",
+            thumbnail=None, playlist=None, visibility="public", debug=False,
+            headless=False, cdp_url="http://127.0.0.1:9223", submit=True,
+            schedule=datetime(2099, 8, 2, 6, 0), timezone="Asia/Shanghai",
+        )
+        with patch("sau_cli.upload_youtube_video", new=AsyncMock(return_value={"visibility": "scheduled"})) as mock_upload:
+            asyncio.run(sau_cli.dispatch(args))
+
+        request = mock_upload.await_args.args[0]
+        self.assertEqual(request.schedule, datetime(2099, 8, 2, 6, 0))
+        self.assertEqual(request.timezone, "Asia/Shanghai")
 
 
 if __name__ == "__main__":

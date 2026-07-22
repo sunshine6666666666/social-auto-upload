@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from conf import BASE_DIR
 from uploader.bilibili_uploader.runtime import run_biliup_command
@@ -191,6 +193,8 @@ class YouTubeVideoUploadRequest:
     headless: bool = False
     cdp_url: str | None = None
     submit: bool = True
+    schedule: datetime | None = None
+    timezone: str = "Asia/Shanghai"
 
 
 def has_interactive_terminal() -> bool:
@@ -323,7 +327,12 @@ async def check_youtube_account(account_name: str, cdp_url: str | None = None) -
     return await youtube_cookie_auth(str(account_file), cdp_url=cdp_url)
 
 
-async def upload_youtube_video(request: YouTubeVideoUploadRequest) -> Path:
+async def upload_youtube_video(request: YouTubeVideoUploadRequest) -> dict | Path:
+    if request.schedule and not request.submit:
+        raise ValueError("YouTube --schedule cannot be combined with --no-submit")
+    if request.schedule and request.visibility != "public":
+        raise ValueError("YouTube scheduled publishing requires --visibility public")
+
     account_file = resolve_account_file("youtube", request.account_name)
     is_ready = await youtube_setup(str(account_file), handle=False, cdp_url=request.cdp_url)
     if not is_ready:
@@ -344,9 +353,11 @@ async def upload_youtube_video(request: YouTubeVideoUploadRequest) -> Path:
         headless=request.headless,
         cdp_url=request.cdp_url,
         submit=request.submit,
+        schedule=request.schedule,
+        timezone=request.timezone,
     )
-    await app.main()
-    return account_file
+    result = await app.main()
+    return result if result is not None else account_file
 
 
 async def upload_video(request: DouyinVideoUploadRequest) -> Path:
@@ -590,6 +601,14 @@ def schedule_value(value: str):
         ) from exc
 
 
+def timezone_value(value: str) -> str:
+    try:
+        ZoneInfo(value)
+    except ZoneInfoNotFoundError as exc:
+        raise argparse.ArgumentTypeError(f"Invalid IANA timezone: {value}") from exc
+    return value
+
+
 def add_runtime_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--debug", action="store_true", help="Enable debug mode")
     headless_group = parser.add_mutually_exclusive_group()
@@ -766,9 +785,17 @@ def build_parser() -> argparse.ArgumentParser:
     youtube_upload_video_parser.add_argument("--playlist", help="Optional playlist name to add the video to (for series)")
     youtube_upload_video_parser.add_argument(
         "--visibility", default="public", choices=["public", "unlisted", "private"], help="Video visibility")
-    youtube_upload_video_parser.add_argument(
+    youtube_submission_group = youtube_upload_video_parser.add_mutually_exclusive_group()
+    youtube_submission_group.add_argument(
+        "--schedule", type=schedule_value, help=f"Schedule public release time in {schedule_help}"
+    )
+    youtube_submission_group.add_argument(
         "--no-submit", dest="submit", action="store_false",
         help="Stop at the YouTube Studio publish page without clicking the final publish button",
+    )
+    youtube_upload_video_parser.add_argument(
+        "--timezone", default="Asia/Shanghai", type=timezone_value,
+        help="IANA timezone for --schedule (default: Asia/Shanghai)",
     )
     add_runtime_flags(youtube_upload_video_parser)
     return parser
@@ -1057,10 +1084,17 @@ async def dispatch(args: argparse.Namespace) -> int:
                 headless=args.headless,
                 cdp_url=getattr(args, "cdp_url", None),
                 submit=args.submit,
+                schedule=getattr(args, "schedule", None),
+                timezone=getattr(args, "timezone", "Asia/Shanghai"),
             )
-            await upload_youtube_video(request)
-            action_label = "submitted" if request.submit else "prepared without submit"
-            print(f"YouTube video upload {action_label}: {request.video_file}")
+            result = await upload_youtube_video(request)
+            if request.schedule:
+                if not isinstance(result, dict):
+                    raise RuntimeError("YouTube scheduled upload finished without Studio readback")
+                print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            else:
+                action_label = "submitted" if request.submit else "prepared without submit"
+                print(f"YouTube video upload {action_label}: {request.video_file}")
             return 0
 
         raise RuntimeError(f"Unsupported YouTube action: {args.action}")
