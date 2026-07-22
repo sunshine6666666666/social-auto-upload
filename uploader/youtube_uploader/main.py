@@ -23,7 +23,11 @@ from conf import DEBUG_MODE
 from uploader.base_video import BaseVideoUploader
 from utils.base_social_media import set_init_script
 from utils.log import youtube_logger
-from utils.browser_runtime import open_browser_session
+from utils.browser_runtime import (
+    open_browser_session,
+    requires_local_cdp_file_input,
+    set_local_file_input_via_cdp,
+)
 
 try:
     # 国内直连 youtube.com 会超时，且 patchright 启的 chromium 不吃系统代理。
@@ -308,7 +312,10 @@ class YouTubeVideo(BaseVideoUploader):
         # 1) 选择视频文件
         file_input = page.locator('input[type="file"]').first
         await file_input.wait_for(state="attached", timeout=60000)
-        await file_input.set_input_files(self.file_path)
+        if requires_local_cdp_file_input(self.cdp_url, Path(self.file_path).stat().st_size):
+            await set_local_file_input_via_cdp(page, 'input[type="file"]', self.file_path)
+        else:
+            await file_input.set_input_files(self.file_path)
 
         # 2) 等详情对话框
         await page.locator("#title-textarea").wait_for(state="visible", timeout=120000)
