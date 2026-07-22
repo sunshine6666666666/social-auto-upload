@@ -319,5 +319,52 @@ class BrowserCliDispatchTests(unittest.TestCase):
         self.assertEqual(len(request.image_files), 2)
 
 
+class YouTubeAgentChromeCliTests(unittest.TestCase):
+    def test_youtube_upload_accepts_no_submit_and_cdp_url(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            video_path = Path(tmp_dir) / "demo.mp4"
+            video_path.write_bytes(b"video")
+            args = sau_cli.build_parser().parse_args(
+                [
+                    "youtube", "upload-video", "--account", "watermelon",
+                    "--file", str(video_path), "--title", "smoke",
+                    "--no-submit", "--cdp-url", "http://127.0.0.1:9223",
+                ]
+            )
+
+        self.assertFalse(args.submit)
+        self.assertEqual(args.cdp_url, "http://127.0.0.1:9223")
+
+    def test_youtube_check_accepts_agent_chrome_cdp_url(self):
+        args = sau_cli.build_parser().parse_args(
+            ["youtube", "check", "--account", "watermelon", "--cdp-url", "http://127.0.0.1:9223"]
+        )
+        self.assertEqual(args.cdp_url, "http://127.0.0.1:9223")
+
+    def test_dispatch_youtube_upload_passes_no_submit_to_request(self):
+        args = Namespace(
+            platform="youtube", action="upload-video", account="watermelon",
+            file=Path("demo.mp4"), title="smoke", desc="", tags="",
+            thumbnail=None, playlist=None, visibility="private", debug=False,
+            headless=False, cdp_url="http://127.0.0.1:9223", submit=False,
+        )
+        with patch("sau_cli.upload_youtube_video", new=AsyncMock()) as mock_upload:
+            asyncio.run(sau_cli.dispatch(args))
+
+        request = mock_upload.await_args.args[0]
+        self.assertFalse(request.submit)
+        self.assertEqual(request.cdp_url, "http://127.0.0.1:9223")
+    def test_upload_youtube_video_passes_no_submit_to_uploader(self):
+        request = sau_cli.YouTubeVideoUploadRequest(
+            account_name="watermelon", video_file=Path("demo.mp4"), title="smoke",
+            description="", tags=[], cdp_url="http://127.0.0.1:9223", submit=False,
+        )
+        with patch("sau_cli.youtube_setup", new=AsyncMock(return_value=True)), patch("sau_cli.YouTubeVideo") as mock_app:
+            mock_app.return_value.main = AsyncMock()
+            asyncio.run(sau_cli.upload_youtube_video(request))
+
+        self.assertFalse(mock_app.call_args.kwargs["submit"])
+
+
 if __name__ == "__main__":
     unittest.main()

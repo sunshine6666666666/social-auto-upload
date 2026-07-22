@@ -48,12 +48,17 @@ def _build_login_result(success, status, message, account_file, current_url=""):
     }
 
 
-async def cookie_auth(account_file) -> bool:
-    """登录态是否仍有效：带 cookie 打开 Studio，没被踢到 Google 登录页且进入了频道页即有效。"""
+async def cookie_auth(account_file, cdp_url: str | None = None) -> bool:
+    """登录态是否仍有效：打开 Studio，没被踢到 Google 登录页且进入了频道页即有效。"""
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True, channel="chrome")
+        session = await open_browser_session(
+            playwright,
+            cdp_url=cdp_url,
+            launch_kwargs={"headless": True, "channel": "chrome"},
+            context_kwargs={"storage_state": account_file},
+        )
         try:
-            context = await browser.new_context(storage_state=account_file)
+            context = session.context
             context = await set_init_script(context)
             page = await context.new_page()
             await page.goto(STUDIO_URL, wait_until="domcontentloaded")
@@ -65,19 +70,22 @@ async def cookie_auth(account_file) -> bool:
         except Exception:
             return False
         finally:
-            await browser.close()
+            await session.close()
 
 
-async def youtube_cookie_gen(account_file, headless: bool = False):
-    """交互式登录：开浏览器让用户登录 Google/YouTube，进入频道页后保存 storage_state。"""
+async def youtube_cookie_gen(account_file, headless: bool = False, cdp_url: str | None = None):
+    """交互式登录：在指定浏览器登录 Google/YouTube，进入频道页后保存 storage_state。"""
     async with async_playwright() as playwright:
-        # 登录必须显形，让用户输账号密码/二步验证
-        browser = await playwright.chromium.launch(headless=False, channel="chrome")
-        context = await browser.new_context()
+        session = await open_browser_session(
+            playwright,
+            cdp_url=cdp_url,
+            launch_kwargs={"headless": False, "channel": "chrome"},
+        )
+        context = session.context
         context = await set_init_script(context)
         page = await context.new_page()
         await page.goto(STUDIO_URL, wait_until="domcontentloaded")
-        youtube_logger.info(_msg("🔐", "请在弹出的浏览器里登录 Google / YouTube 账号，登录后会自动保存"))
+        youtube_logger.info(_msg("🔐", "请在浏览器里登录 Google / YouTube 账号，登录后会自动保存"))
         ok = False
         for _ in range(600):  # 最多等 10 分钟
             if "/channel/" in page.url:
@@ -90,19 +98,25 @@ async def youtube_cookie_gen(account_file, headless: bool = False):
             youtube_logger.success(_msg("✅", f"YouTube 登录态已保存: {account_file}"))
         else:
             youtube_logger.error(_msg("😵", "等待登录超时，未保存登录态"))
-        await browser.close()
+        await session.close()
         return _build_login_result(ok, "logged_in" if ok else "timeout",
                                    "登录成功" if ok else "登录超时", account_file, page.url)
 
 
-async def youtube_setup(account_file, handle: bool = False, return_detail: bool = False, headless: bool = False):
+async def youtube_setup(
+    account_file,
+    handle: bool = False,
+    return_detail: bool = False,
+    headless: bool = False,
+    cdp_url: str | None = None,
+):
     """校验登录态，失效且 handle=True 时拉起交互式登录。"""
-    if not Path(account_file).exists() or not await cookie_auth(account_file):
+    if not Path(account_file).exists() or not await cookie_auth(account_file, cdp_url=cdp_url):
         if not handle:
             result = _build_login_result(False, "cookie_invalid", "登录态不存在或已失效", account_file)
             return result if return_detail else False
         youtube_logger.info(_msg("🥹", "YouTube 登录态不存在或失效，准备打开浏览器登录"))
-        result = await youtube_cookie_gen(account_file, headless=headless)
+        result = await youtube_cookie_gen(account_file, headless=headless, cdp_url=cdp_url)
         return result if return_detail else result["success"]
     result = _build_login_result(True, "cookie_valid", "登录态有效", account_file)
     return result if return_detail else True
@@ -186,7 +200,8 @@ async def _wait_upload_complete(page: Page, max_polls: int = 360) -> bool:
 class YouTubeVideo(BaseVideoUploader):
     def __init__(self, title, file_path, tags, account_file, *,
                  description="", thumbnail_path=None, playlist=None,
-                 visibility="public", debug=DEBUG_MODE, headless=False, cdp_url: str | None = None):
+                 visibility="public", debug=DEBUG_MODE, headless=False, cdp_url: str | None = None,
+                 submit: bool = True):
         self.title = title
         self.file_path = str(file_path)
         self.tags = tags or []
@@ -198,6 +213,7 @@ class YouTubeVideo(BaseVideoUploader):
         self.debug = debug
         self.headless = headless
         self.cdp_url = cdp_url
+        self.submit = submit
 
     async def upload(self, playwright: Playwright) -> None:
         session = await open_browser_session(
@@ -312,20 +328,23 @@ class YouTubeVideo(BaseVideoUploader):
         await _wait_upload_complete(page)
 
         # 11) 发布
-        await page.wait_for_timeout(1200)
-        if not await _click_if_present(page, "#done-button", 15000):
-            youtube_logger.warning(_msg("🤔", "未找到发布按钮，可能上传未到可发布进度；请在窗口里手动发布"))
+        if not self.submit:
+            youtube_logger.success(_msg("🛑", "已到达发布前页面，按 --no-submit 停止"))
         else:
-            await page.wait_for_timeout(4000)
-            video_url = ""
-            try:
-                link = page.locator("a[href*='youtu.be'], a[href*='watch?v=']").first
-                if await link.count():
-                    video_url = await link.get_attribute("href") or ""
-            except Exception:
-                pass
-            await _click_if_present(page, "ytcp-button:has-text('Close'), ytcp-button:has-text('关闭'), #close-button", 8000)
-            youtube_logger.success(_msg("🥳", f"发布完成（{self.visibility}）{(' ' + video_url) if video_url else ''}"))
+            await page.wait_for_timeout(1200)
+            if not await _click_if_present(page, "#done-button", 15000):
+                youtube_logger.warning(_msg("🤔", "未找到发布按钮，可能上传未到可发布进度；请在窗口里手动发布"))
+            else:
+                await page.wait_for_timeout(4000)
+                video_url = ""
+                try:
+                    link = page.locator("a[href*='youtu.be'], a[href*='watch?v=']").first
+                    if await link.count():
+                        video_url = await link.get_attribute("href") or ""
+                except Exception:
+                    pass
+                await _click_if_present(page, "ytcp-button:has-text('Close'), ytcp-button:has-text('关闭'), #close-button", 8000)
+                youtube_logger.success(_msg("🥳", f"发布完成（{self.visibility}）{(' ' + video_url) if video_url else ''}"))
 
         # 刷新 cookie
         try:

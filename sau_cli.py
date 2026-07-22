@@ -190,6 +190,7 @@ class YouTubeVideoUploadRequest:
     debug: bool = True
     headless: bool = False
     cdp_url: str | None = None
+    submit: bool = True
 
 
 def has_interactive_terminal() -> bool:
@@ -306,21 +307,25 @@ async def check_tencent_account(account_name: str) -> bool:
     return await tencent_cookie_auth(str(account_file))
 
 
-async def login_youtube_account(account_name: str, headless: bool = False) -> dict:
+async def login_youtube_account(
+    account_name: str, headless: bool = False, cdp_url: str | None = None
+) -> dict:
     account_file = resolve_account_file("youtube", account_name)
-    return await youtube_setup(str(account_file), handle=True, return_detail=True, headless=headless)
+    return await youtube_setup(
+        str(account_file), handle=True, return_detail=True, headless=headless, cdp_url=cdp_url
+    )
 
 
-async def check_youtube_account(account_name: str) -> bool:
+async def check_youtube_account(account_name: str, cdp_url: str | None = None) -> bool:
     account_file = resolve_account_file("youtube", account_name)
     if not account_file.exists():
         return False
-    return await youtube_cookie_auth(str(account_file))
+    return await youtube_cookie_auth(str(account_file), cdp_url=cdp_url)
 
 
 async def upload_youtube_video(request: YouTubeVideoUploadRequest) -> Path:
     account_file = resolve_account_file("youtube", request.account_name)
-    is_ready = await youtube_setup(str(account_file), handle=False)
+    is_ready = await youtube_setup(str(account_file), handle=False, cdp_url=request.cdp_url)
     if not is_ready:
         raise RuntimeError(
             f"YouTube cookie is missing or expired: {account_file}. Run `sau youtube login --account {request.account_name}` first."
@@ -338,6 +343,7 @@ async def upload_youtube_video(request: YouTubeVideoUploadRequest) -> Path:
         debug=request.debug,
         headless=request.headless,
         cdp_url=request.cdp_url,
+        submit=request.submit,
     )
     await app.main()
     return account_file
@@ -748,8 +754,7 @@ def build_parser() -> argparse.ArgumentParser:
     for action_name in ("login", "check"):
         action_parser = youtube_actions.add_parser(action_name, help=f"YouTube {action_name}")
         action_parser.add_argument("--account", required=True, help="YouTube user-defined account_name")
-        if action_name == "login":
-            add_runtime_flags(action_parser)
+        add_runtime_flags(action_parser)
 
     youtube_upload_video_parser = youtube_actions.add_parser("upload-video", help="Upload one video to YouTube")
     youtube_upload_video_parser.add_argument("--account", required=True, help="YouTube user-defined account_name")
@@ -761,6 +766,10 @@ def build_parser() -> argparse.ArgumentParser:
     youtube_upload_video_parser.add_argument("--playlist", help="Optional playlist name to add the video to (for series)")
     youtube_upload_video_parser.add_argument(
         "--visibility", default="public", choices=["public", "unlisted", "private"], help="Video visibility")
+    youtube_upload_video_parser.add_argument(
+        "--no-submit", dest="submit", action="store_false",
+        help="Stop at the YouTube Studio publish page without clicking the final publish button",
+    )
     add_runtime_flags(youtube_upload_video_parser)
     return parser
 
@@ -1021,14 +1030,16 @@ async def dispatch(args: argparse.Namespace) -> int:
 
     if args.platform == "youtube":
         if args.action == "login":
-            result = await login_youtube_account(args.account, headless=args.headless)
+            result = await login_youtube_account(
+                args.account, headless=args.headless, cdp_url=getattr(args, "cdp_url", None)
+            )
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"YouTube login flow completed: {result['account_file']}")
             return 0
 
         if args.action == "check":
-            is_valid = await check_youtube_account(args.account)
+            is_valid = await check_youtube_account(args.account, cdp_url=getattr(args, "cdp_url", None))
             print("valid" if is_valid else "invalid")
             return 0 if is_valid else 1
 
@@ -1045,9 +1056,11 @@ async def dispatch(args: argparse.Namespace) -> int:
                 debug=args.debug,
                 headless=args.headless,
                 cdp_url=getattr(args, "cdp_url", None),
+                submit=args.submit,
             )
             await upload_youtube_video(request)
-            print(f"YouTube video upload submitted: {request.video_file}")
+            action_label = "submitted" if request.submit else "prepared without submit"
+            print(f"YouTube video upload {action_label}: {request.video_file}")
             return 0
 
         raise RuntimeError(f"Unsupported YouTube action: {args.action}")
