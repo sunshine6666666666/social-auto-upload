@@ -3,7 +3,13 @@ from datetime import datetime
 from pathlib import Path
 import unittest
 
-from uploader.youtube_uploader.main import parse_scheduled_publish_readback
+from uploader.youtube_uploader.main import (
+    SCHEDULE_BUTTON_SELECTOR,
+    advance_to_visibility,
+    parse_scheduled_publish_readback,
+    readback_scheduled_publication,
+    wait_for_schedule_control,
+)
 from utils.browser_runtime import requires_local_cdp_file_input, set_local_file_input_via_cdp
 
 
@@ -11,6 +17,7 @@ class YouTubeScheduleReadbackTests(unittest.TestCase):
     def test_readback_returns_machine_readable_scheduled_result(self):
         html = '''
         <script>
+        {"entity_id":"UC04E0U6ZAZoD5y3lcVNUNHQ"}
         {"entity_id":"QMiJvZPJJv0", "scheduledPublishingDetails":
           {"scheduledPublishings":[{"scheduledTimeSeconds":"1785621600",
           "action":"SCHEDULED_PUBLISHING_ACTION_SET_PUBLIC",
@@ -47,6 +54,135 @@ class YouTubeScheduleReadbackTests(unittest.TestCase):
             parse_scheduled_publish_readback(
                 html, expected_schedule=datetime(2026, 8, 2, 7, 0), timezone="Asia/Shanghai"
             )
+
+
+    def test_readback_reopens_studio_edit_page_when_upload_dialog_lacks_metadata(self):
+        scheduled_html = '''
+        {"entity_id":"QMiJvZPJJv0", "scheduledPublishingDetails":
+          {"scheduledPublishings":[{"scheduledTimeSeconds":"1785621600",
+          "status":"SCHEDULED_PUBLISHING_STATUS_SCHEDULED"}]}}
+        '''
+
+        class FakePage:
+            def __init__(self):
+                self.html = '<a href="https://youtu.be/QMiJvZPJJv0">link</a>'
+                self.gotos = []
+
+            async def content(self):
+                return self.html
+
+            async def goto(self, url, wait_until):
+                self.gotos.append((url, wait_until))
+                self.html = scheduled_html
+
+            async def wait_for_timeout(self, milliseconds):
+                return None
+
+        page = FakePage()
+        result = asyncio.run(
+            readback_scheduled_publication(
+                page,
+                expected_schedule=datetime(2026, 8, 2, 6, 0),
+                timezone="Asia/Shanghai",
+                max_polls=2,
+                poll_ms=1,
+            )
+        )
+
+        self.assertEqual(page.gotos, [("https://studio.youtube.com/video/QMiJvZPJJv0/edit", "domcontentloaded")])
+        self.assertEqual(result["videoId"], "QMiJvZPJJv0")
+
+
+class ScheduleControlWaitTests(unittest.TestCase):
+    def test_schedule_selector_covers_studio_expand_control(self):
+        self.assertIn("second-container-expand-button", SCHEDULE_BUTTON_SELECTOR)
+
+    def test_wait_for_schedule_control_retries_until_button_appears(self):
+        class FakeButton:
+            def __init__(self, page):
+                self.page = page
+
+            @property
+            def first(self):
+                return self
+
+            async def wait_for(self, state, timeout):
+                self.page.wait_attempts += 1
+                if self.page.wait_attempts < 3:
+                    raise TimeoutError("not ready")
+
+            async def click(self):
+                self.page.clicks += 1
+
+        class FakePage:
+            def __init__(self):
+                self.wait_attempts = 0
+                self.clicks = 0
+                self.sleeps = []
+
+            def locator(self, selector):
+                self.selector = selector
+                return FakeButton(self)
+
+            async def wait_for_timeout(self, milliseconds):
+                self.sleeps.append(milliseconds)
+
+        page = FakePage()
+        asyncio.run(wait_for_schedule_control(page, timeout_ms=50, poll_ms=4))
+
+        self.assertEqual(page.selector, SCHEDULE_BUTTON_SELECTOR)
+        self.assertEqual(page.clicks, 1)
+        self.assertEqual(page.sleeps, [3, 3])
+
+
+class VisibilityNavigationTests(unittest.TestCase):
+    def test_advance_to_visibility_clicks_next_after_checks_finish(self):
+        class FakeNext:
+            def __init__(self, page):
+                self.page = page
+
+            @property
+            def first(self):
+                return self
+
+            async def wait_for(self, state, timeout):
+                return None
+
+            async def click(self):
+                self.page.next_clicks += 1
+
+        class FakeVisibility:
+            def __init__(self, page):
+                self.page = page
+
+            async def count(self):
+                return 1
+
+            @property
+            def first(self):
+                return self
+
+            async def is_visible(self):
+                return self.page.next_clicks >= 2
+
+        class FakePage:
+            def __init__(self):
+                self.next_clicks = 0
+
+            def locator(self, selector):
+                if "name='PUBLIC'" in selector:
+                    return FakeVisibility(self)
+                if selector == "#next-button":
+                    return FakeNext(self)
+                raise AssertionError(selector)
+
+            async def wait_for_timeout(self, milliseconds):
+                return None
+
+        page = FakePage()
+        asyncio.run(advance_to_visibility(page, timeout_ms=12, poll_ms=4))
+
+        self.assertEqual(page.next_clicks, 2)
 
 
 class CdpUploadRoutingTests(unittest.TestCase):

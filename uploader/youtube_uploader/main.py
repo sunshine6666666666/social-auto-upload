@@ -39,6 +39,13 @@ except Exception:
 STUDIO_URL = "https://studio.youtube.com"
 UPLOAD_URL = "https://www.youtube.com/upload"
 VISIBILITY = {"public": "PUBLIC", "unlisted": "UNLISTED", "private": "PRIVATE"}
+SCHEDULE_BUTTON_SELECTOR = (
+    "ytcp-video-visibility-select #second-container-expand-button, "
+    "#schedule-button, ytcp-button#schedule-button, "
+    "ytcp-button:has-text('Schedule'), ytcp-button:has-text('安排时间'), "
+    "ytcp-button:has-text('预定'), ytcp-button:has-text('安排'), "
+    "[aria-label*='Schedule'], [aria-label*='安排'], [aria-label*='预定']"
+)
 
 
 def _msg(emoji: str, text: str) -> str:
@@ -57,7 +64,11 @@ def parse_scheduled_publish_readback(
 ) -> dict[str, str | int]:
     """Read Studio's embedded CreatorVideoData and reject incomplete/mismatched scheduling evidence."""
     payload = html.replace(r'\"', '"')
-    video_match = re.search(r'"entity_id"\s*:\s*"([^"\\]+)"', payload)
+    video_match = re.search(r'"videoId"\s*:\s*"([A-Za-z0-9_-]{11})"', payload)
+    if not video_match:
+        # Legacy upload-dialog payloads expose entity_id; constrain it to a video ID
+        # so a preceding 24-char channel ID cannot be returned as the publish URL.
+        video_match = re.search(r'"entity_id"\s*:\s*"([A-Za-z0-9_-]{11})"', payload)
     seconds_match = re.search(r'"scheduledTimeSeconds"\s*:\s*"?(\d+)"?', payload)
     if not video_match:
         raise RuntimeError("YouTube Studio readback did not include a video ID")
@@ -83,6 +94,40 @@ def parse_scheduled_publish_readback(
         "scheduledAt": actual.isoformat(),
         "timezone": timezone,
     }
+
+
+async def readback_scheduled_publication(
+    page: Page,
+    *,
+    expected_schedule: datetime,
+    timezone: str,
+    max_polls: int = 24,
+    poll_ms: int = 2500,
+) -> dict[str, str | int]:
+    """Read back scheduling from the edit page when the upload wizard lacks CreatorVideoData."""
+    navigated_to_edit = False
+    last_error: RuntimeError | None = None
+    for attempt in range(max_polls):
+        html = await page.content()
+        try:
+            return parse_scheduled_publish_readback(
+                html, expected_schedule=expected_schedule, timezone=timezone
+            )
+        except RuntimeError as exc:
+            last_error = exc
+
+        if not navigated_to_edit:
+            video_match = re.search(r"(?:youtu\.be/|watch\?v=)([A-Za-z0-9_-]{11})", html)
+            if video_match:
+                await page.goto(
+                    f"{STUDIO_URL}/video/{video_match.group(1)}/edit", wait_until="domcontentloaded"
+                )
+                navigated_to_edit = True
+                continue
+        if attempt + 1 < max_polls:
+            await page.wait_for_timeout(poll_ms)
+
+    raise last_error or RuntimeError("YouTube Studio scheduled readback did not become available")
 
 
 def _build_login_result(success, status, message, account_file, current_url=""):
@@ -216,6 +261,39 @@ async def _click_if_present(page: Page, selector: str, timeout: int = 4000) -> b
         return False
 
 
+async def wait_for_schedule_control(page: Page, *, timeout_ms: int = 30 * 60 * 1000, poll_ms: int = 5000) -> None:
+    """Wait until Studio exposes the collapsed native scheduling section within one time budget."""
+    attempts = max(1, (timeout_ms + poll_ms - 1) // poll_ms)
+    click_timeout = max(1, min(1000, poll_ms // 4))
+    wait_after_failure = max(0, poll_ms - click_timeout)
+    for attempt in range(attempts):
+        if await _click_if_present(page, SCHEDULE_BUTTON_SELECTOR, click_timeout):
+            return
+        if attempt + 1 < attempts:
+            await page.wait_for_timeout(wait_after_failure)
+    raise RuntimeError("YouTube Studio did not expose the schedule controls after processing wait")
+
+
+async def advance_to_visibility(
+    page: Page, *, timeout_ms: int = 30 * 60 * 1000, poll_ms: int = 2000
+) -> None:
+    """Advance through post-upload processing until Studio exposes the visibility radios."""
+    public = page.locator("tp-yt-paper-radio-button[name='PUBLIC']")
+    attempts = max(1, (timeout_ms + poll_ms - 1) // poll_ms)
+    click_timeout = max(1, min(1000, poll_ms // 4))
+    wait_after_failure = max(0, poll_ms - click_timeout)
+    for attempt in range(attempts):
+        try:
+            if await public.count() and await public.first.is_visible():
+                return
+        except Exception:
+            pass
+        await _click_if_present(page, "#next-button", click_timeout)
+        if attempt + 1 < attempts:
+            await page.wait_for_timeout(wait_after_failure)
+    raise RuntimeError("YouTube Studio did not reach the visibility step after processing")
+
+
 async def _wait_upload_complete(page: Page, max_polls: int = 360) -> bool:
     """等网页上传从 X% 跑到 100% 再发布。浏览器上传靠窗口开着才传得完，
     若上传到一半就点发布并关闭浏览器，上传会被掐断卡在中途（如 76%）。
@@ -249,20 +327,18 @@ async def _configure_scheduled_publication(page: Page, schedule: datetime, timez
     if local_time <= datetime.now(ZoneInfo(timezone)):
         raise ValueError(f"YouTube scheduled time must be in the future: {local_time.isoformat()}")
 
-    if not await _click_if_present(
-        page, "#schedule-button, ytcp-button:has-text('Schedule'), ytcp-button:has-text('安排时间')", 10000
-    ):
-        raise RuntimeError("YouTube Studio did not expose the schedule controls")
+    await wait_for_schedule_control(page)
 
-    date_input = page.locator(
-        "#schedule-date-picker input, input[aria-label*='Date'], input[aria-label*='日期']"
-    ).first
-    time_input = page.locator(
-        "#schedule-time-picker input, input[aria-label*='Time'], input[aria-label*='时间']"
-    ).first
+    date_trigger = page.locator("ytcp-video-visibility-select #datepicker-trigger").first
+    await date_trigger.wait_for(state="visible", timeout=10000)
+    await date_trigger.click()
+    date_input = page.locator("ytcp-date-picker input").first
+    time_input = page.locator("ytcp-video-visibility-select #time-of-day-container input").first
     await date_input.wait_for(state="visible", timeout=10000)
     await time_input.wait_for(state="visible", timeout=10000)
-    await date_input.fill(local_time.strftime("%m/%d/%Y"))
+    # Studio's Chinese locale exposes this same human-readable date in the picker input.
+    await date_input.fill(f"{local_time.year}年{local_time.month}月{local_time.day}日")
+    await date_input.press("Enter")
     await time_input.fill(local_time.strftime("%H:%M"))
     youtube_logger.info(_msg("🗓️", f"设置 Studio 原生预约: {local_time.isoformat()}"))
 
@@ -384,25 +460,22 @@ class YouTubeVideo(BaseVideoUploader):
             except Exception as exc:
                 youtube_logger.warning(_msg("⚠️", f"标签填写跳过（不影响发布）: {exc}"))
 
-        # 9) 连点 Next 到“可见性”步骤
-        for _ in range(5):
-            vis = page.locator("tp-yt-paper-radio-button[name='PUBLIC']")
-            if await vis.count() and await vis.first.is_visible():
-                break
-            if not await _click_if_present(page, "#next-button", 6000):
-                await page.wait_for_timeout(1200)
-            await page.wait_for_timeout(1000)
+        # 9) 可见性由上传/处理完成后的 wizard 步骤设置；此处不提前点击 Next。
 
-        # 10) 可见性
+        # 10) 可见性需在处理完成、向导进入公开范围步骤后设置。
         if self.schedule:
             self.visibility = "public"
-        youtube_logger.info(_msg("🌐", f"设置可见性 = {self.visibility}"))
-        await _click_if_present(page, f"tp-yt-paper-radio-button[name='{VISIBILITY[self.visibility]}']", 10000)
 
         # 10.5) 关键：等上传真正传完再发布。浏览器上传靠窗口开着传，
         #       传到一半就点发布+关浏览器 = 上传被掐断卡在中途（如 76%）。
         youtube_logger.info(_msg("📤", "等待上传完成（传完才发布）…"))
         await _wait_upload_complete(page)
+        await advance_to_visibility(page)
+        youtube_logger.info(_msg("🌐", f"设置可见性 = {self.visibility}"))
+        if not await _click_if_present(
+            page, f"tp-yt-paper-radio-button[name='{VISIBILITY[self.visibility]}']", 10000
+        ):
+            raise RuntimeError("YouTube Studio did not expose the requested visibility control")
 
         # 11) 发布 / Studio 原生预约
         result: dict[str, str | int | bool] = {"visibility": self.visibility, "submitted": self.submit}
@@ -413,8 +486,8 @@ class YouTubeVideo(BaseVideoUploader):
             if not await _click_if_present(page, "#done-button", 15000):
                 raise RuntimeError("YouTube Studio did not expose the final Schedule button")
             await page.wait_for_timeout(4000)
-            result = parse_scheduled_publish_readback(
-                await page.content(), expected_schedule=self.schedule, timezone=self.timezone
+            result = await readback_scheduled_publication(
+                page, expected_schedule=self.schedule, timezone=self.timezone
             )
             youtube_logger.success(_msg("🗓️", f"Studio 原生预约已核验: {result['publishUrl']}"))
             await _click_if_present(page, "ytcp-button:has-text('Close'), ytcp-button:has-text('关闭'), #close-button", 8000)
