@@ -14,6 +14,247 @@ import requests
 
 GITHUB_RELEASE_API = "https://api.github.com/repos/biliup/biliup/releases/latest"
 
+BILI_COLLECTION_LIST_API = "https://member.bilibili.com/x2/creative/web/seasons"
+
+
+def _read_biliup_cookie_str(account_file: Path) -> str:
+    """Build a Cookie header string from a biliup account JSON file (never printed)."""
+    import json
+
+    data = json.loads(Path(account_file).read_text(encoding="utf-8"))
+    cookie_info = data.get("cookie_info", {})
+    raw_cookies = cookie_info.get("cookies", [])
+    if isinstance(raw_cookies, dict):
+        raw_cookies = [raw_cookies]
+    pairs = []
+    for entry in raw_cookies:
+        if isinstance(entry, dict) and entry.get("name"):
+            pairs.append(f"{entry['name']}={entry.get('value', '')}")
+        elif isinstance(entry, str):
+            pairs.append(entry)
+    return "; ".join(p for p in pairs if p)
+
+
+def resolve_bilibili_season_id(account_file: Path, collection_name: str, timeout: int = 20) -> int:
+    """Resolve a Bilibili collection (合集/series) name to its season id using the account cookie.
+
+    Raises RuntimeError when the account is missing, the API fails, or no collection
+    matches the requested name.
+    """
+    import json
+
+    account_path = Path(account_file)
+    if not account_path.exists():
+        raise RuntimeError(f"Bilibili account file is missing: {account_path}")
+    if not collection_name or not collection_name.strip():
+        raise RuntimeError("collection name must not be empty")
+
+    cookie_str = _read_biliup_cookie_str(account_path)
+    if not cookie_str:
+        raise RuntimeError(f"Bilibili account file contains no cookies: {account_path}")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+        "Cookie": cookie_str,
+        "Referer": "https://member.bilibili.com/platform/upload-manager/ep",
+        "Origin": "https://member.bilibili.com",
+        "Accept": "application/json, text/plain, */*",
+    }
+    params = {"pn": 1, "ps": 50, "order": "", "sort": "", "draft": 1, "source": 0}
+    response = requests.get(BILI_COLLECTION_LIST_API, headers=headers, params=params, timeout=timeout)
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("code") != 0:
+        raise RuntimeError(f"Bilibili collection list API failed: code={payload.get('code')} msg={payload.get('message')}")
+
+    seasons = (payload.get("data") or {}).get("seasons") or []
+    needle = collection_name.strip()
+    for item in seasons:
+        inner = item.get("season") or {}
+        if inner.get("title") == needle:
+            season_id = inner.get("id")
+            if not season_id:
+                raise RuntimeError(f"Bilibili collection '{needle}' has no season id")
+            return int(season_id)
+
+    available = [str((item.get("season") or {}).get("title")) for item in seasons]
+    raise RuntimeError(
+        f"Bilibili collection '{needle}' not found. Available collections: {', '.join(a for a in available if a) or 'none'}"
+    )
+
+
+def resolve_bilibili_section_id(account_file: Path, season_id: int, timeout: int = 20) -> int:
+    """Resolve the default section id of a Bilibili collection (needed by episodes/add)."""
+    account_path = Path(account_file)
+    cookie_str = _read_biliup_cookie_str(account_path)
+    if not cookie_str:
+        raise RuntimeError(f"Bilibili account file contains no cookies: {account_path}")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/151.0 Safari/537.36",
+        "Cookie": cookie_str,
+        "Referer": "https://member.bilibili.com/platform/upload-manager/ep",
+        "Origin": "https://member.bilibili.com",
+        "Accept": "application/json, text/plain, */*",
+    }
+    response = requests.get(
+        f"https://member.bilibili.com/x2/creative/web/season?id={season_id}",
+        headers=headers,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("code") != 0:
+        raise RuntimeError(f"Bilibili season detail API failed: code={payload.get('code')} msg={payload.get('message')}")
+    sections = (payload.get("data") or {}).get("sections") or {}
+    if isinstance(sections, dict):
+        sections = sections.get("sections") or []
+    for sec in sections:
+        if isinstance(sec, dict):
+            sid = sec.get("id") or sec.get("section_id")
+            if sid:
+                return int(sid)
+    raise RuntimeError(f"Bilibili season {season_id} has no section")
+
+
+def find_bilibili_archive_aid(account_file: Path, title: str, timeout: int = 20, attempts: int = 8) -> int:
+    """Find the aid of the newest archive matching an exact title via the creator archive list.
+
+    Retries up to ``attempts`` times with a short delay because a freshly submitted
+    archive may not appear in the creator list immediately.
+    """
+    import time
+
+    account_path = Path(account_file)
+    cookie_str = _read_biliup_cookie_str(account_path)
+    if not cookie_str:
+        raise RuntimeError(f"Bilibili account file contains no cookies: {account_path}")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/151.0 Safari/537.36",
+        "Cookie": cookie_str,
+        "Referer": "https://member.bilibili.com/platform/upload-manager/ep",
+        "Origin": "https://member.bilibili.com",
+        "Accept": "application/json, text/plain, */*",
+    }
+    params = {"pn": 1, "ps": 10}
+    needle = title.strip()
+    last_error = ""
+    for attempt in range(attempts):
+        response = requests.get(
+            "https://member.bilibili.com/x2/creative/web/archives/sp",
+            headers=headers,
+            params=params,
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("code") != 0:
+            last_error = f"code={payload.get('code')} msg={payload.get('message')}"
+            time.sleep(3)
+            continue
+        archives = (payload.get("data") or {}).get("arc_audits") or []
+        for archive in archives:
+            if isinstance(archive, dict):
+                inner = archive.get("Archive") or archive
+                if (inner.get("title") or "").strip() == needle:
+                    aid = inner.get("aid") or inner.get("id")
+                    if aid:
+                        return int(aid)
+        time.sleep(3)
+    raise RuntimeError(
+        f"Bilibili archive with title '{needle}' not found in creator archive list"
+        + (f" ({last_error})" if last_error else "")
+    )
+
+
+def fetch_bilibili_archive_cid(account_file: Path, aid: int, timeout: int = 20) -> int:
+    """Fetch the first cid of an archive (needed by the collection episodes/add API)."""
+    account_path = Path(account_file)
+    cookie_str = _read_biliup_cookie_str(account_path)
+    if not cookie_str:
+        raise RuntimeError(f"Bilibili account file contains no cookies: {account_path}")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/151.0 Safari/537.36",
+        "Cookie": cookie_str,
+        "Referer": "https://member.bilibili.com/platform/upload-manager/ep",
+        "Origin": "https://member.bilibili.com",
+        "Accept": "application/json, text/plain, */*",
+    }
+    response = requests.get(
+        f"https://member.bilibili.com/x/web/archive/videos?aid={aid}",
+        headers=headers,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("code") != 0:
+        raise RuntimeError(f"Bilibili archive videos API failed: code={payload.get('code')} msg={payload.get('message')}")
+    videos = (payload.get("data") or {}).get("videos") or []
+    for video in videos:
+        if isinstance(video, dict) and video.get("cid"):
+            return int(video["cid"])
+    raise RuntimeError(f"Bilibili archive {aid} has no videos")
+
+
+def add_archive_to_season(
+    account_file: Path,
+    aid: int,
+    cid: int,
+    title: str,
+    section_id: int,
+    timeout: int = 20,
+) -> None:
+    """Add an archive to a Bilibili collection via the creator episodes/add API."""
+    import json as _json
+
+    account_path = Path(account_file)
+    cookie_str = _read_biliup_cookie_str(account_path)
+    if not cookie_str:
+        raise RuntimeError(f"Bilibili account file contains no cookies: {account_path}")
+    csrf = ""
+    for entry in _json.loads(Path(account_path).read_text(encoding="utf-8")).get("cookie_info", {}).get("cookies", []):
+        if isinstance(entry, dict) and entry.get("name") == "bili_jct":
+            csrf = entry.get("value", "")
+            break
+    if not csrf:
+        raise RuntimeError("Bilibili account file has no bili_jct csrf cookie")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/151.0 Safari/537.36",
+        "Cookie": cookie_str,
+        "Referer": "https://member.bilibili.com/platform/upload-manager/ep",
+        "Origin": "https://member.bilibili.com",
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/plain, */*",
+    }
+    body = {
+        "sectionId": section_id,
+        "episodes": [
+            {
+                "title": title,
+                "aid": aid,
+                "cid": cid,
+                "charging_pay": 0,
+                "member_first": 0,
+                "limited_free": False,
+            }
+        ],
+    }
+    response = requests.post(
+        f"https://member.bilibili.com/x2/creative/web/season/section/episodes/add?csrf={csrf}",
+        headers=headers,
+        json=body,
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("code") != 0:
+        raise RuntimeError(
+            f"Bilibili add-to-collection API failed: code={payload.get('code')} msg={payload.get('message')}"
+        )
+
 
 def get_biliup_runtime_root() -> Path:
     return Path.home() / ".social-auto-upload" / "tools" / "biliup"

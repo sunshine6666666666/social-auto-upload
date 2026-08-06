@@ -12,7 +12,14 @@ from typing import Iterable, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from conf import BASE_DIR
-from uploader.bilibili_uploader.runtime import run_biliup_command
+from uploader.bilibili_uploader.runtime import (
+    add_archive_to_season,
+    fetch_bilibili_archive_cid,
+    find_bilibili_archive_aid,
+    resolve_bilibili_season_id,
+    resolve_bilibili_section_id,
+    run_biliup_command,
+)
 from uploader.douyin_uploader.main import (
     DOUYIN_PUBLISH_STRATEGY_IMMEDIATE,
     DOUYIN_PUBLISH_STRATEGY_SCHEDULED,
@@ -157,6 +164,7 @@ class BilibiliVideoUploadRequest:
     publish_date: datetime | int
     thumbnail_file: Path | None = None
     charging_pay: bool = False
+    collection: str | None = None
 
 
 @dataclass(slots=True)
@@ -542,12 +550,25 @@ async def upload_bilibili_video(request: BilibiliVideoUploadRequest) -> Path:
         arguments.extend(["--cover", str(request.thumbnail_file)])
     if request.charging_pay:
         arguments.extend(["--charging-pay", "1"])
+    season_id: int | None = None
+    section_id: int | None = None
+    if request.collection:
+        season_id = resolve_bilibili_season_id(account_file, request.collection)
+        section_id = resolve_bilibili_section_id(account_file, season_id)
+        arguments.extend(["--extra-fields", json.dumps({"season_id": season_id})])
     if isinstance(request.publish_date, datetime):
         arguments.extend(["--dtime", str(int(request.publish_date.timestamp()))])
 
     result = run_biliup_command(arguments)
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "").strip() or "Bilibili upload failed")
+
+    if request.collection and season_id is not None and section_id is not None:
+        # biliup submits via the APP API which ignores season_id; add the archive to the
+        # collection afterwards through the creator episodes/add API.
+        aid = find_bilibili_archive_aid(account_file, request.title)
+        cid = fetch_bilibili_archive_cid(account_file, aid)
+        add_archive_to_season(account_file, aid, cid, request.title, section_id)
     return account_file
 
 
@@ -736,6 +757,7 @@ def build_parser() -> argparse.ArgumentParser:
     bilibili_upload_video_parser.add_argument("--tid", required=True, type=int, help="Bilibili category id")
     bilibili_upload_video_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
     bilibili_upload_video_parser.add_argument("--thumbnail", type=existing_file_path, help="Optional Bilibili cover image path")
+    bilibili_upload_video_parser.add_argument("--collection", default=None, help="Optional Bilibili collection (合集) name to submit the video into")
     bilibili_upload_video_parser.add_argument(
         "--charging-pay",
         action="store_true",
@@ -1008,6 +1030,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 publish_date=args.schedule or 0,
                 thumbnail_file=args.thumbnail,
                 charging_pay=args.charging_pay,
+                collection=args.collection,
             )
             await upload_bilibili_video(request)
             print(f"Bilibili video upload submitted: {request.video_file}")

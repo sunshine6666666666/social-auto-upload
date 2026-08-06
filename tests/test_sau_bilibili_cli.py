@@ -129,3 +129,72 @@ class BilibiliCliTests(unittest.TestCase):
                 "--tag", "test", "--cover", "cover.png",
             ],
         )
+
+    def test_build_parser_accepts_bilibili_collection_for_upload_video(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = Path(temp_dir) / "demo.mp4"
+            video.write_bytes(b"video")
+            args = sau_cli.build_parser().parse_args(
+                [
+                    "bilibili", "upload-video", "--account", "creator",
+                    "--file", str(video), "--title", "hello", "--desc", "hello",
+                    "--tid", "36", "--collection", "英语新闻博客",
+                ]
+            )
+        self.assertEqual(args.collection, "英语新闻博客")
+
+    def test_upload_bilibili_video_passes_season_id_via_extra_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            account_file = Path(temp_dir) / "account.json"
+            account_file.write_text("{}", encoding="utf-8")
+            request = sau_cli.BilibiliVideoUploadRequest(
+                account_name="creator",
+                video_file=Path("demo.mp4"),
+                title="hello",
+                description="hello",
+                tid=36,
+                tags=[],
+                publish_date=0,
+                collection="英语新闻博客",
+            )
+            with patch("sau_cli.resolve_account_file", return_value=account_file), patch(
+                "sau_cli.resolve_bilibili_season_id", return_value=8762246
+            ), patch(
+                "sau_cli.resolve_bilibili_section_id", return_value=9765963
+            ), patch(
+                "sau_cli.find_bilibili_archive_aid", return_value=117046750808432
+            ), patch(
+                "sau_cli.fetch_bilibili_archive_cid", return_value=40644183101
+            ), patch(
+                "sau_cli.add_archive_to_season"
+            ) as mock_add, patch(
+                "sau_cli.run_biliup_command",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run_biliup:
+                asyncio.run(sau_cli.upload_bilibili_video(request))
+
+        self.assertIn("--extra-fields", run_biliup.call_args.args[0])
+        idx = run_biliup.call_args.args[0].index("--extra-fields")
+        self.assertEqual(run_biliup.call_args.args[0][idx + 1], '{"season_id": 8762246}')
+        mock_add.assert_called_once_with(account_file, 117046750808432, 40644183101, "hello", 9765963)
+
+    def test_upload_bilibili_video_without_collection_skips_extra_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            account_file = Path(temp_dir) / "account.json"
+            account_file.write_text("{}", encoding="utf-8")
+            request = sau_cli.BilibiliVideoUploadRequest(
+                account_name="creator",
+                video_file=Path("demo.mp4"),
+                title="hello",
+                description="hello",
+                tid=36,
+                tags=[],
+                publish_date=0,
+            )
+            with patch("sau_cli.resolve_account_file", return_value=account_file), patch(
+                "sau_cli.run_biliup_command",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run_biliup:
+                asyncio.run(sau_cli.upload_bilibili_video(request))
+
+        self.assertNotIn("--extra-fields", run_biliup.call_args.args[0])
