@@ -293,17 +293,97 @@ class DouYinBaseUploader(BaseVideoUploader):
             self.publish_date = 0
 
     async def set_schedule_time_douyin(self, page, publish_date):
+        """抖音「定时发布」：点日历日期 + Semi ScrollList 滚轮选时分。
+
+        2026-08-08 实测：Semi DatePicker 是日历面板 + 滚轮选择，
+        直接键入文本或 JS click 不可靠（键入不生效、click 滚动偏移），
+        可靠路径是：
+          1) 点「定时发布」radio
+          2) 点输入框打开面板，在日历上点目标日期（DD）
+          3) 点时间 switch 打开滚轮
+          4) 用滚轮把 hour/minute wheel 的选中项驱动到目标时分
+          5) Escape 关闭，回读 input value 核验与请求时间一致
+        """
         label_element = page.locator("[class^='radio']:has-text('定时发布')")
         await label_element.click()
         await asyncio.sleep(1)
-        publish_date_hour = publish_date.strftime("%Y-%m-%d %H:%M")
 
+        date_input = page.locator('.semi-input[placeholder="日期和时间"]')
+        await date_input.click()
+        await asyncio.sleep(1.5)
+
+        # 1) 日历点选目标日期（DD）；月份不匹配时先点月份导航（当前实现先支持同月/相邻月场景，
+        #    以页面可见月份内的日期为准；跨月由调用方保证 --schedule 在合理范围内）
+        day_str = str(publish_date.day)
+        day_cell = page.locator(
+            ".semi-datepicker:visible span:not([class]):not(:has(*)):text-is('{}')".format(day_str)
+        ).first
+        await day_cell.click(timeout=6000)
         await asyncio.sleep(1)
-        await page.locator('.semi-input[placeholder="日期和时间"]').click()
-        await page.keyboard.press("Control+KeyA")
-        await page.keyboard.type(str(publish_date_hour))
-        await page.keyboard.press("Enter")
-        await asyncio.sleep(1)
+
+        # 2) 打开时间滚轮
+        time_switch = page.locator(".semi-datepicker-switch-text:has-text(':')").first
+        await time_switch.click(timeout=6000)
+        await asyncio.sleep(1.5)
+
+        # 3) 用 wheel 驱动 hour wheel 到目标小时
+        await self._spin_wheel_to(page, "hour", publish_date.hour)
+        # 4) 用 wheel 驱动 minute wheel 到目标分钟
+        await self._spin_wheel_to(page, "minute", publish_date.minute)
+
+        # 5) 关闭面板并回读核验
+        await page.keyboard.press("Escape")
+        await asyncio.sleep(1.5)
+        actual = await date_input.input_value()
+        expected = publish_date.strftime("%Y-%m-%d %H:%M")
+        if actual != expected:
+            raise RuntimeError(
+                f"抖音定时时间回读核验失败：期望 {expected}，实际 {actual}"
+            )
+        douyin_logger.info(_msg("📅", f"已设置定时发布 {actual}"))
+
+    async def _spin_wheel_to(self, page, wheel_kind: str, target: int) -> None:
+        """驱动 Semi ScrollList 滚轮，把选中项滚到 target。
+
+        滚轮是循环列表（60 项两轮 / 24 项多轮），选中项由 scrollTop 取模决定。
+        直接 JS click 会点到不可见元素；可靠方式是用 CDP wheel 事件滚动，
+        使目标值进入视口中心（Semi 的 scrolllist-selector 对齐处）。
+        """
+        kind_class = "list-hour" if wheel_kind == "hour" else "list-minute"
+        wheel = page.locator(f"[class*='{kind_class}']").first
+        await wheel.wait_for(state="visible", timeout=6000)
+
+        # 视口中心坐标（滚动目标）
+        box = await wheel.bounding_box()
+        if not box:
+            raise RuntimeError(f"抖音 {wheel_kind} wheel 无边界框")
+        cx = box["x"] + box["width"] / 2
+        cy = box["y"] + box["height"] / 2
+
+        # 用 JS 读取当前选中值（selected item 文本，如 "15时" / "30分"）
+        current_text = await page.eval_on_selector(
+            f"[class*='{kind_class}'] .semi-scrolllist-item-selected",
+            "el => el.innerText.trim()",
+        )
+        current = int("".join(ch for ch in current_text if ch.isdigit()))
+        step = 1 if target >= current else -1
+        guard = 0
+        # 把鼠标移到 wheel 中心，确保 wheel 事件落在 wheel 上
+        await page.mouse.move(cx, cy)
+        while current != target and guard < 80:
+            # 每次滚动一格（约 36px），然后重读选中项；动画期间短暂等待
+            await page.mouse.wheel(0, step * 36)
+            await asyncio.sleep(0.25)
+            current_text = await page.eval_on_selector(
+                f"[class*='{kind_class}'] .semi-scrolllist-item-selected",
+                "el => el.innerText.trim()",
+            )
+            current = int("".join(ch for ch in current_text if ch.isdigit()))
+            guard += 1
+        if current != target:
+            raise RuntimeError(
+                f"抖音 {wheel_kind} 滚轮未到达目标 {target}，当前 {current}"
+            )
 
     async def fill_title_and_description(self, page: Page, title: str, description: str, tags: list[str] | None = None):
         # 2026-06 抖音发布页 DOM：标题=input[placeholder*=填写作品标题]，描述=div.zone-container[contenteditable]
