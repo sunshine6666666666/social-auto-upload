@@ -239,6 +239,8 @@ class BrowserCliDispatchTests(unittest.TestCase):
             product_title="",
             debug=False,
             headless=True,
+            declaration="无需添加自主声明",
+            collection=None,
         )
         with patch("sau_cli.upload_video", new=AsyncMock()) as mock_upload:
             asyncio.run(sau_cli.dispatch(args))
