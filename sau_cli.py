@@ -77,6 +77,8 @@ class DouyinVideoUploadRequest:
     debug: bool = True
     headless: bool = True
     cdp_url: str | None = None
+    declaration: str = "无需添加自主声明"
+    collection: str | None = None
 
 
 @dataclass(slots=True)
@@ -395,6 +397,8 @@ async def upload_video(request: DouyinVideoUploadRequest) -> Path:
         debug=request.debug,
         headless=request.headless,
         cdp_url=request.cdp_url,
+        declaration=request.declaration,
+        collection=request.collection,
     )
     await app.douyin_upload_video()
     return account_file
@@ -672,6 +676,24 @@ def build_parser() -> argparse.ArgumentParser:
     upload_video_parser.add_argument("--thumbnail-portrait", type=existing_file_path, help="Optional 3:4 portrait thumbnail path")
     upload_video_parser.add_argument("--product-link", default="", help="Optional product link")
     upload_video_parser.add_argument("--product-title", default="", help="Optional product title")
+    upload_video_parser.add_argument(
+        "--declaration",
+        default="无需添加自主声明",
+        choices=[
+            "无需添加自主声明",
+            "内容由AI生成",
+            "内容为个人观点或见解",
+            "内容为转载信息",
+            "内容含营销推广信息",
+            "虚构演绎，仅供娱乐",
+        ],
+        help="Douyin 自主声明 (default: 无需添加自主声明)",
+    )
+    upload_video_parser.add_argument(
+        "--collection",
+        default=None,
+        help="Optional Douyin collection (合集) name to select during publishing",
+    )
     add_runtime_flags(upload_video_parser)
 
     upload_note_parser = douyin_actions.add_parser("upload-note", help="Upload one note to Douyin")
@@ -856,6 +878,8 @@ async def dispatch(args: argparse.Namespace) -> int:
                 debug=args.debug,
                 headless=args.headless,
                 cdp_url=getattr(args, "cdp_url", None),
+                declaration=args.declaration,
+                collection=args.collection,
             )
             await upload_video(request)
             print(f"Douyin video upload submitted: {request.video_file}")

@@ -406,11 +406,13 @@ class DouYinBaseUploader(BaseVideoUploader):
             douyin_logger.error(_msg("😢", f"设置商品链接时出错: {str(e)}"))
             return False
 
-    async def set_self_declaration(self, page: Page, declaration: str = "内容为个人观点或见解") -> None:
+    async def set_self_declaration(self, page: Page, declaration: str = "无需添加自主声明") -> None:
         """抖音「自主声明」为发布必选项：打开声明弹窗 → 选指定类型 → 确定。
 
-        入口和弹窗都是异步渲染，等不到就记 warning 跳过、继续发布，绝不因此中断
-        （与小红书话题、视频号声明原创的容错策略保持一致）。
+        默认选择「无需添加自主声明」（不声明任何内容）；调用方可通过 CLI
+        --declaration 显式指定其它类型。入口和弹窗都是异步渲染，等不到就记
+        warning 跳过、继续发布，绝不因此中断（与小红书话题、视频号声明原创
+        的容错策略保持一致）。
         """
         try:
             # 发布页底部「自主声明」行，未选时显示占位文案「请选择自主声明」
@@ -434,6 +436,38 @@ class DouYinBaseUploader(BaseVideoUploader):
             douyin_logger.info(_msg("🧾", f"自主声明已选择「{declaration}」"))
         except Exception as exc:
             douyin_logger.warning(_msg("🧾", f"自主声明设置失败，跳过该步骤继续发布：{exc}"))
+
+    async def set_collection(self, page: Page, collection_name: str) -> None:
+        """抖音发布页选择合集（合集/系列）。
+
+        未传 --collection 时不调用本方法。按名称在合集选择器中匹配目标合集；
+        找不到目标时明确报错（不静默跳过，避免"以为入集了其实没有"）。
+        """
+        if not collection_name or not collection_name.strip():
+            return
+        needle = collection_name.strip()
+        try:
+            # 发布页「合集」入口：未选时是「请选择合集」占位，入口行也有「添加合集」
+            entry = page.locator(
+                'div:has-text("添加合集"):not(:has-text("请选择合集")), div:has-text("请选择合集")'
+            ).first
+            await entry.click(timeout=6000)
+
+            # 等待弹层/下拉出现
+            await page.wait_for_timeout(1000)
+
+            # 合集下拉真实 DOM：选项为 .select-dropdown-option-video（无搜索框、无 role=option）
+            option = page.locator(
+                '[class*="dropdown-option"]:has-text("{0}"), [class*="option"]:has-text("{0}")'.format(needle)
+            ).first
+            if not await option.count():
+                raise RuntimeError(f"抖音合集「{needle}」未找到，请先在创作者中心创建或核对合集名")
+
+            await option.click(timeout=6000)
+            await page.wait_for_timeout(500)
+            douyin_logger.info(_msg("📚", f"已选择抖音合集「{needle}」"))
+        except Exception as exc:
+            raise RuntimeError(f"抖音合集选择失败：{exc}") from exc
 
     async def select_bgm(self, page: Page, bgm_name: str) -> bool:
         """为图文发布选择 BGM：可选增强功能，搜索无结果或异常均跳过不中断发布。"""
@@ -519,6 +553,8 @@ class DouYinVideo(DouYinBaseUploader):
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
         cdp_url: str | None = None,
+        declaration: str = "无需添加自主声明",
+        collection: str | None = None,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -536,6 +572,8 @@ class DouYinVideo(DouYinBaseUploader):
         self.productLink = productLink
         self.productTitle = productTitle
         self.desc = desc or ""
+        self.declaration = declaration
+        self.collection = collection
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -688,7 +726,10 @@ class DouYinVideo(DouYinBaseUploader):
 
         await self.set_thumbnail(page)
 
-        await self.set_self_declaration(page)
+        await self.set_self_declaration(page, self.declaration)
+
+        if self.collection:
+            await self.set_collection(page, self.collection)
 
         third_part_element = '[class^="info"] > [class^="first-part"] div div.semi-switch'
         if await page.locator(third_part_element).count():
