@@ -2,7 +2,9 @@ import asyncio
 import tempfile
 import unittest
 from argparse import Namespace
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import sau_cli
@@ -141,6 +143,117 @@ class DouyinUploaderDefaultTests(unittest.TestCase):
         )
         self.assertEqual(app.declaration, "内容为个人观点或见解")
         self.assertEqual(app.collection, "英语新闻（训练版）")
+
+
+class DouyinScheduleTests(unittest.TestCase):
+    def _make_app(self):
+        return DouYinVideo(
+            title="hello",
+            file_path="demo.mp4",
+            tags=[],
+            publish_date=0,
+            account_file="account.json",
+        )
+
+    def _make_wheel_page(self, eval_side):
+        from unittest.mock import MagicMock
+
+        page = MagicMock()
+        page.eval_on_selector = AsyncMock(side_effect=eval_side)
+        page.mouse = SimpleNamespace(wheel=AsyncMock(), move=AsyncMock())
+        wheel_locator = MagicMock()
+        wheel_locator.wait_for = AsyncMock()
+        wheel_locator.bounding_box = AsyncMock(return_value={"x": 100, "y": 200, "width": 140, "height": 267})
+        # page.locator(sel) returns a locator whose .first resolves to the same async-capable mock
+        page.locator = MagicMock(return_value=SimpleNamespace(first=wheel_locator))
+        return page
+
+    def test_spin_wheel_to_rolls_forward(self):
+        app = self._make_app()
+        state = {"hour": 6}
+
+        def eval_side(selector, js):
+            if "list-hour" in selector:
+                cur = state["hour"]
+                state["hour"] += 1
+                return f"{cur:02d}时"
+            return "00分"
+
+        page = self._make_wheel_page(eval_side)
+
+        async def run():
+            await app._spin_wheel_to(page, "hour", 8)
+
+        asyncio.run(run())
+        # read 06 → wheel(1) → read 07 → wheel(2) → read 08 done
+        self.assertEqual(page.mouse.wheel.call_count, 2)
+        self.assertTrue(page.mouse.move.called)
+
+    def test_spin_wheel_to_rolls_backward(self):
+        app = self._make_app()
+        state = {"hour": 15}
+
+        def eval_side(selector, js):
+            if "list-hour" in selector:
+                cur = state["hour"]
+                state["hour"] -= 1
+                return f"{cur:02d}时"
+            return "30分"
+
+        page = self._make_wheel_page(eval_side)
+
+        async def run():
+            await app._spin_wheel_to(page, "hour", 6)
+
+        asyncio.run(run())
+        # started at 15, target 6 → backward rolls (wheel negative)
+        self.assertGreater(page.mouse.wheel.call_count, 0)
+        args = page.mouse.wheel.call_args_list
+        self.assertLess(args[0].args[1], 0)
+
+    def _make_locator(self, **attrs):
+        """A fake locator supporting both `.click()` (direct) and `.first.<op>()`."""
+        from unittest.mock import MagicMock
+
+        loc = MagicMock()
+        for name, mock in attrs.items():
+            setattr(loc, name, mock)
+        # real Locator.click is async; expose it on both the locator and .first
+        loc.click = AsyncMock()
+        loc.first = loc
+        return loc
+
+    def test_set_schedule_time_readback_mismatch_raises(self):
+        from unittest.mock import MagicMock
+
+        app = self._make_app()
+        page = MagicMock()
+
+        radio_locator = self._make_locator()
+        date_input_locator = self._make_locator()
+        date_input_locator.input_value = AsyncMock(return_value="2026-08-13 06:03")
+        day_cell = self._make_locator()
+        time_switch = self._make_locator()
+        page.keyboard = SimpleNamespace(press=AsyncMock())
+        app._spin_wheel_to = AsyncMock()
+
+        def locator_side(sel):
+            if "日期和时间" in sel:
+                return date_input_locator
+            if "semi-datepicker:visible span" in sel:
+                return day_cell
+            if "semi-datepicker-switch-text" in sel:
+                return time_switch
+            return radio_locator
+
+        page.locator = MagicMock(side_effect=locator_side)
+
+        async def run():
+            await app.set_schedule_time_douyin(page, datetime(2026, 8, 13, 6, 0))
+
+        with self.assertRaises(RuntimeError) as ctx:
+            asyncio.run(run())
+        self.assertIn("回读核验失败", str(ctx.exception))
 
 
 if __name__ == "__main__":
