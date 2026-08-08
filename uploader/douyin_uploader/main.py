@@ -522,23 +522,31 @@ class DouYinBaseUploader(BaseVideoUploader):
 
         未传 --collection 时不调用本方法。按名称在合集选择器中匹配目标合集；
         找不到目标时明确报错（不静默跳过，避免"以为入集了其实没有"）。
+
+        2026-08-08 实测修正（issue #5）：`div:has-text(...)` 宽匹配会在发布页命中
+        27 个祖先容器，`.first` 命中最外层整页容器导致下拉从未打开、误报「未找到」。
+        正确入口是叶子节点「请选择合集」（div 无子 div，实测唯一命中 20px 高度）。
         """
         if not collection_name or not collection_name.strip():
             return
         needle = collection_name.strip()
         try:
-            # 发布页「合集」入口：未选时是「请选择合集」占位，入口行也有「添加合集」
-            entry = page.locator(
-                'div:has-text("添加合集"):not(:has-text("请选择合集")), div:has-text("请选择合集")'
-            ).first
+            # 入口：叶子节点「请选择合集」（无子 div 的唯一 leaf），避免命中祖先容器
+            entry = page.locator('div:has-text("请选择合集"):not(:has(div))').first
+            if not await entry.count():
+                # 兜底：已选择过合集时入口显示合集名，退而匹配「添加合集」叶子节点
+                entry = page.locator('div:has-text("添加合集"):not(:has(div))').first
             await entry.click(timeout=6000)
 
             # 等待弹层/下拉出现
             await page.wait_for_timeout(1000)
 
-            # 合集下拉真实 DOM：选项为 .select-dropdown-option-video（无搜索框、无 role=option）
+            # 合集下拉真实 DOM（2026-08-08 实测）：选项为 .semi-select-option collection-opt，
+            # 文本形如「英语新闻（训练版）\n共480个作品」；同时保留 [class*="dropdown-option"] 兼容
             option = page.locator(
-                '[class*="dropdown-option"]:has-text("{0}"), [class*="option"]:has-text("{0}")'.format(needle)
+                '.semi-select-option:has-text("{0}"), [class*="dropdown-option"]:has-text("{0}")'.format(
+                    needle
+                )
             ).first
             if not await option.count():
                 raise RuntimeError(f"抖音合集「{needle}」未找到，请先在创作者中心创建或核对合集名")
