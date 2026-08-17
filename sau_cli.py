@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,6 +13,12 @@ from typing import Iterable, Sequence
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from conf import BASE_DIR
+
+try:
+    from conf import YT_MAX_DURATION_SECONDS
+except Exception:
+    # 保守默认：未验证账号 YouTube 上传上限 15 分钟；已验证账号可在 conf.py 覆写为 43200（12 小时）。
+    YT_MAX_DURATION_SECONDS = 900
 from uploader.bilibili_uploader.runtime import (
     add_archive_to_season,
     fetch_bilibili_archive_cid,
@@ -337,11 +344,60 @@ async def check_youtube_account(account_name: str, cdp_url: str | None = None) -
     return await youtube_cookie_auth(str(account_file), cdp_url=cdp_url)
 
 
+def probe_video_duration_seconds(file_path: Path) -> float | None:
+    """Probe media duration with ffprobe; None when duration cannot be determined.
+
+    Uses the same best-effort contract as the upload pipeline: a missing/unusable
+    ffprobe returns None instead of raising, so uploads that cannot be probed keep
+    their previous behavior (YouTube still enforces its own limit server-side).
+    """
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(file_path),
+            ],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (FileNotFoundError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return float(result.stdout.strip())
+    except ValueError:
+        return None
+
+
+def assert_video_duration_within_limit(file_path: Path, max_duration_seconds: float) -> float | None:
+    """Raise before upload when a known duration exceeds the account cap.
+
+    Returns the probed duration, or None when it could not be determined
+    (best-effort: warn-and-continue rather than block unprobeable files).
+    """
+    duration = probe_video_duration_seconds(file_path)
+    if duration is None:
+        print(f"提醒：无法用 ffprobe 读取视频时长，跳过时长上限预检（{file_path}）", file=sys.stderr)
+        return None
+    if duration > max_duration_seconds:
+        raise ValueError(
+            f"YouTube 视频时长 {duration:.1f}s（{duration / 60:.1f} 分钟）超过账号上传上限 "
+            f"{max_duration_seconds:.0f}s（{max_duration_seconds / 60:.0f} 分钟），已提前终止，未发起上传。"
+            f"\n如需调整上限，可在 conf.py 中设置 YT_MAX_DURATION_SECONDS（已验证账号常用 43200 = 12 小时）。"
+        )
+    return duration
+
+
 async def upload_youtube_video(request: YouTubeVideoUploadRequest) -> dict | Path:
     if request.schedule and not request.submit:
         raise ValueError("YouTube --schedule cannot be combined with --no-submit")
     if request.schedule and request.visibility != "public":
         raise ValueError("YouTube scheduled publishing requires --visibility public")
+
+    # 上传前预检：视频时长超过账号上限（默认 15 分钟）时提前终止，避免白传大文件。
+    assert_video_duration_within_limit(request.video_file, YT_MAX_DURATION_SECONDS)
 
     account_file = resolve_account_file("youtube", request.account_name)
     is_ready = await youtube_setup(str(account_file), handle=False, cdp_url=request.cdp_url)
