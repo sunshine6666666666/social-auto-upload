@@ -6,6 +6,7 @@ import unittest
 from uploader.youtube_uploader.main import (
     SCHEDULE_BUTTON_SELECTOR,
     advance_to_visibility,
+    find_processing_failure,
     parse_scheduled_publish_readback,
     readback_scheduled_publication,
     wait_for_schedule_control,
@@ -54,6 +55,41 @@ class YouTubeScheduleReadbackTests(unittest.TestCase):
             parse_scheduled_publish_readback(
                 html, expected_schedule=datetime(2026, 8, 2, 7, 0), timezone="Asia/Shanghai"
             )
+
+    def test_readback_rejects_structured_processing_failure_marker(self):
+        # Studio may keep SCHEDULED status while the video failed processing;
+        # the readback must not declare success in that case (#8).
+        html = '''
+        {"entity_id":"QMiJvZPJJv0", "scheduledPublishingDetails":
+          {"scheduledPublishings":[{"scheduledTimeSeconds":"1785621600",
+          "status":"SCHEDULED_PUBLISHING_STATUS_SCHEDULED"}]},
+         "processingStatus":"FAILED", "processingFailureCode":"BAD_VIDEO_TOO_LONG"}
+        '''
+        with self.assertRaisesRegex(RuntimeError, "processing failure"):
+            parse_scheduled_publish_readback(
+                html, expected_schedule=datetime(2026, 8, 2, 6, 0), timezone="Asia/Shanghai"
+            )
+
+    def test_readback_rejects_chinese_processing_failure_banner(self):
+        # The failure is reported as a Studio UI banner, not structured payload data.
+        html = '''
+        {"entity_id":"QMiJvZPJJv0", "scheduledPublishingDetails":
+          {"scheduledPublishings":[{"scheduledTimeSeconds":"1785621600",
+          "status":"SCHEDULED_PUBLISHING_STATUS_SCHEDULED"}]}}
+        <div class="banner">处理中断 · 视频过长</div>
+        '''
+        with self.assertRaisesRegex(RuntimeError, "false success"):
+            parse_scheduled_publish_readback(
+                html, expected_schedule=datetime(2026, 8, 2, 6, 0), timezone="Asia/Shanghai"
+            )
+
+    def test_find_processing_failure_returns_none_on_clean_evidence(self):
+        html = '''
+        {"entity_id":"QMiJvZPJJv0", "scheduledPublishingDetails":
+          {"scheduledPublishings":[{"scheduledTimeSeconds":"1785621600",
+          "status":"SCHEDULED_PUBLISHING_STATUS_SCHEDULED"}]}}
+        '''
+        self.assertIsNone(find_processing_failure(html.replace(r'\"', '"'), html))
 
 
     def test_readback_reopens_studio_edit_page_when_upload_dialog_lacks_metadata(self):

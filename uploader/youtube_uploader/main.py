@@ -59,6 +59,41 @@ def _normalize_schedule(expected_schedule: datetime, timezone: str) -> datetime:
     return expected_schedule.astimezone(zone)
 
 
+# Explicit processing-failure markers that must poison an otherwise "scheduled" readback.
+# Studio may keep showing a scheduled time while the video itself failed processing
+# (e.g. "处理中断 · 视频过长"); treating only SCHEDULED_PUBLISHING_STATUS_SCHEDULED as
+# success then yields a false success receipt. Markers cover both Studio UI strings
+# (zh/en) and structured CreatorVideoData fields (unescaped after html.replace(r'\"', '"')).
+PROCESSING_FAILURE_MARKERS: tuple[str, ...] = (
+    # UI / banner text
+    "处理中断",
+    "处理失败",
+    "处理出错",
+    "视频过长",
+    "无法处理",
+    "processing interrupted",
+    "processing failed",
+    "video too long",
+    "failed to process",
+    # structured CreatorVideoData fields
+    "processingFailureCode",
+    "PROCESSING_STATUS_FAILED",
+    '"processingStatus":"FAILED"',
+)
+
+
+def find_processing_failure(payload: str, html: str = "") -> str | None:
+    """Return the first recognized processing-failure marker, else None.
+
+    `payload` is the unescaped Studio evidence; `html` is the raw page content and is
+    checked as a fallback for UI text that does not survive the unescape step.
+    """
+    for marker in PROCESSING_FAILURE_MARKERS:
+        if marker in payload or marker in html:
+            return marker
+    return None
+
+
 def parse_scheduled_publish_readback(
     html: str, *, expected_schedule: datetime, timezone: str
 ) -> dict[str, str | int]:
@@ -76,6 +111,13 @@ def parse_scheduled_publish_readback(
         raise RuntimeError("YouTube Studio readback did not include scheduledTimeSeconds")
     if "SCHEDULED_PUBLISHING_STATUS_SCHEDULED" not in payload:
         raise RuntimeError("YouTube Studio readback did not confirm scheduled visibility")
+
+    failure_marker = find_processing_failure(payload, html)
+    if failure_marker is not None:
+        raise RuntimeError(
+            "YouTube Studio reports video processing failure "
+            f"({failure_marker!r}); scheduled readback is a false success"
+        )
 
     scheduled_seconds = int(seconds_match.group(1))
     actual = datetime.fromtimestamp(scheduled_seconds, tz=ZoneInfo(timezone))
