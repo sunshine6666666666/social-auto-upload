@@ -34,6 +34,10 @@ async def open_browser_session(
 
     When cdp_url is set, prefer the existing persistent context from Agent Chrome so the
     uploader can reuse that profile's login state. If no context exists, create a new one.
+    When an explicit account identity is requested (``context_kwargs["storage_state"]``),
+    always create a dedicated context with those cookies instead of reusing the browser's
+    active context: the active account of a shared CDP browser must never decide the
+    upload identity (issue #6 — uploads could land on the wrong channel).
     """
 
     launch_kwargs = launch_kwargs or {}
@@ -41,6 +45,12 @@ async def open_browser_session(
 
     if cdp_url:
         browser = await playwright.chromium.connect_over_cdp(cdp_url)
+        if context_kwargs.get("storage_state") is not None:
+            # Explicit account identity wins over the CDP browser's active account:
+            # create a fresh context with the requested cookies so uploads run as
+            # the target account, and close only that context afterwards.
+            context = await browser.new_context(**context_kwargs)
+            return BrowserSession(browser=browser, context=context, should_close_context=True)
         if use_existing_context and browser.contexts:
             return BrowserSession(browser=browser, context=browser.contexts[0], should_close_context=False)
         context = await browser.new_context(**context_kwargs)
