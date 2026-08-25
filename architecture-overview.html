@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Social Auto Upload · 架构地图</title>
+  <style>
+    :root { --bg:#0f172a; --surface:#172238; --surface-2:#1e293b; --line:#475569; --text:#f8fafc; --muted:#aab7cc; --accent:#22c55e; --blue:#60a5fa; --violet:#a78bfa; --amber:#fbbf24; --red:#fb7185; --radius:18px; }
+    * { box-sizing:border-box; } html { scroll-behavior:smooth; } body { margin:0; background:radial-gradient(circle at 12% -8%,#1d355f 0,transparent 34rem),radial-gradient(circle at 90% 0,#20265a 0,transparent 30rem),var(--bg); color:var(--text); font:16px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif; }
+    button,a { font:inherit; } button { cursor:pointer; } a { color:inherit; }
+    .skip { position:absolute; left:12px; top:-50px; padding:10px 14px; background:#fff; color:#111827; border-radius:9px; z-index:10; } .skip:focus { top:12px; }
+    header { position:sticky; top:0; z-index:5; display:flex; justify-content:space-between; align-items:center; gap:20px; padding:14px clamp(18px,4vw,64px); border-bottom:1px solid #ffffff1f; background:#0f172ae8; backdrop-filter:blur(16px); }
+    .brand { display:flex; align-items:center; gap:11px; font-weight:700; text-decoration:none; } .brand-mark { width:30px; height:30px; border-radius:9px; display:grid; place-items:center; background:linear-gradient(135deg,var(--accent),var(--blue)); color:#082f1b; }
+    .brand svg,.button svg,.signal svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+    .header-meta { color:var(--muted); font-size:13px; } .status { color:#bbf7d0; }
+    main { max-width:1440px; margin:auto; padding:clamp(32px,5vw,72px) clamp(18px,4vw,64px) 72px; }
+    .eyebrow { color:#86efac; letter-spacing:.12em; text-transform:uppercase; font-size:12px; font-weight:700; } h1 { max-width:900px; font-size:clamp(34px,5vw,64px); line-height:1.08; letter-spacing:-.045em; margin:10px 0 16px; } .lead { max-width:780px; color:var(--muted); font-size:clamp(17px,2vw,21px); }
+    .metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin:32px 0 20px; } .metric { min-height:104px; padding:18px; border:1px solid #ffffff1c; background:#172238a8; border-radius:var(--radius); } .metric strong { display:block; font-size:28px; letter-spacing:-.04em; } .metric span { color:var(--muted); font-size:13px; }
+    .verification { display:flex; flex-wrap:wrap; gap:10px; margin:0 0 42px; } .signal { display:flex; align-items:center; gap:8px; padding:8px 11px; border:1px solid #ffffff20; border-radius:999px; color:#dbeafe; background:#172238a0; font-size:13px; } .signal svg { color:var(--accent); width:15px; }
+    .section-head { display:flex; justify-content:space-between; align-items:end; gap:18px; margin:36px 0 16px; } h2 { margin:0; font-size:25px; letter-spacing:-.03em; } .section-head p { max-width:590px; margin:0; color:var(--muted); font-size:14px; }
+    .toolbar { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; } .filter { border:1px solid #ffffff26; border-radius:999px; padding:9px 13px; color:#dbeafe; background:#172238; transition:background .18s,transform .18s,border-color .18s; } .filter:hover { transform:translateY(-1px); border-color:#ffffff60; } .filter[aria-pressed="true"] { color:#062513; border-color:#86efac; background:#86efac; }
+    .map-wrap { position:relative; display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:18px; } .map { position:relative; min-height:660px; overflow:hidden; padding:22px; border:1px solid #ffffff1c; border-radius:24px; background:linear-gradient(135deg,#172238d9,#111a2cd9); }
+    .map::before { content:""; position:absolute; inset:0; opacity:.34; background-image:linear-gradient(#ffffff0d 1px,transparent 1px),linear-gradient(90deg,#ffffff0d 1px,transparent 1px); background-size:32px 32px; pointer-events:none; }
+    .flows { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; opacity:.55; } .flows path { fill:none; stroke:#8ba4c8; stroke-width:1.4; stroke-dasharray:5 7; }
+    .architecture { position:relative; display:grid; grid-template-columns:repeat(3,minmax(150px,1fr)); gap:18px; align-items:center; min-height:615px; }
+    .node { position:relative; min-height:130px; padding:17px; text-align:left; color:var(--text); border:1px solid #ffffff27; border-radius:16px; background:linear-gradient(145deg,#263550e8,#172238e8); box-shadow:0 12px 34px #02061738; transition:transform .2s, border-color .2s, opacity .2s; } .node:hover,.node:focus-visible { transform:translateY(-3px); border-color:#93c5fd; outline:3px solid #93c5fd45; } .node.active { border-color:#86efac; box-shadow:0 0 0 2px #86efac42,0 16px 40px #02061770; } .node.dim { opacity:.22; }
+    .node .tag { display:inline-block; padding:3px 7px; border-radius:999px; background:#ffffff16; color:#cbd5e1; font-size:11px; } .node h3 { margin:10px 0 4px; font-size:17px; } .node p { margin:0; color:var(--muted); font-size:13px; line-height:1.45; } .node.front { border-top:3px solid var(--violet); } .node.entry { border-top:3px solid var(--blue); } .node.upload { border-top:3px solid var(--accent); } .node.runtime { border-top:3px solid var(--amber); } .node.ops { border-top:3px solid var(--red); }
+    .inspector { min-height:340px; padding:20px; border:1px solid #ffffff1c; border-radius:24px; background:#172238c2; } .inspector .caption { margin:0 0 6px; color:#86efac; font-size:12px; font-weight:700; letter-spacing:.1em; } .inspector h3 { margin:0 0 10px; font-size:22px; } .inspector p { color:var(--muted); font-size:14px; } .file-list { margin:18px 0 0; padding:0; list-style:none; } .file-list li { margin:8px 0; padding:8px; border-left:2px solid #64748b; background:#0f172a8c; border-radius:0 8px 8px 0; font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace; color:#dbeafe; overflow-wrap:anywhere; } .button { display:inline-flex; align-items:center; gap:8px; min-height:44px; margin-top:18px; padding:10px 13px; color:#062513; text-decoration:none; font-weight:700; background:var(--accent); border-radius:10px; }
+    .layers { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; } .layer { padding:16px; border:1px solid #ffffff1c; border-radius:14px; background:#1722389e; } .layer button { display:block; width:100%; padding:0; text-align:left; color:inherit; border:0; background:transparent; } .layer h3 { margin:6px 0; font-size:16px; } .layer p { margin:0; color:var(--muted); font-size:13px; } .count { color:#86efac; font-size:13px; font-variant-numeric:tabular-nums; }
+    .reading { display:grid; grid-template-columns:1.15fr .85fr; gap:18px; margin-top:18px; } .panel { padding:22px; border:1px solid #ffffff1c; border-radius:20px; background:#172238a8; } .tour { margin:12px 0 0; padding:0; list-style:none; counter-reset:tour; } .tour li { position:relative; padding:0 0 16px 42px; color:#dbeafe; } .tour li::before { counter-increment:tour; content:counter(tour); position:absolute; left:0; top:0; display:grid; width:26px; height:26px; place-items:center; border-radius:50%; background:#334155; color:#e2e8f0; font-size:12px; font-weight:700; } .tour li:not(:last-child)::after { content:""; position:absolute; left:12px; top:30px; width:1px; height:calc(100% - 19px); background:#475569; } .tour span { display:block; color:var(--muted); font-size:13px; }
+    .note { border-left:3px solid var(--amber); padding-left:14px; color:#cbd5e1; font-size:14px; } footer { margin-top:44px; color:#94a3b8; font-size:12px; text-align:center; }
+    @media (max-width:980px) { .metrics,.layers { grid-template-columns:repeat(2,minmax(0,1fr)); } .map-wrap,.reading { grid-template-columns:1fr; } .architecture { grid-template-columns:repeat(2,minmax(0,1fr)); } .map { min-height:720px; } .flows { display:none; } }
+    @media (max-width:560px) { header { align-items:flex-start; } .header-meta { display:none; } main { padding-top:32px; } .metrics,.layers,.architecture { grid-template-columns:1fr; } .map { min-height:auto; } .architecture { min-height:auto; } .node { min-height:112px; } }
+    @media (prefers-reduced-motion:reduce) { * { scroll-behavior:auto!important; transition:none!important; } }
+  </style>
+</head>
+<body>
+  <a class="skip" href="#architecture">跳到架构图</a>
+  <header>
+    <a class="brand" href="#top"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></span>Social Auto Upload · 架构地图</a>
+    <div class="header-meta"><span class="status">● 双源已核验</span> · 快照 0a2052b</div>
+  </header>
+  <main id="top">
+    <div class="eyebrow">离线单文件 · 中文架构总览</div>
+    <h1>把“发布一次内容”拆成<br>可维护的自动化流水线。</h1>
+    <p class="lead">从 CLI 与管理端进入，统一交给平台上传器，再复用浏览器运行时与账号状态。此页面基于 Understand Anything 的完整文件图谱，并以 CodeGraph 复核代码入口、路由和关键调用。</p>
+    <section class="metrics" aria-label="架构统计">
+      <div class="metric"><strong>407</strong><span>图谱节点</span></div><div class="metric"><strong>671</strong><span>关系边</span></div><div class="metric"><strong>8</strong><span>架构层</span></div><div class="metric"><strong>89</strong><span>CodeGraph 源码文件</span></div>
+    </section>
+    <div class="verification" aria-label="核验依据">
+      <div class="signal"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>Understand Anything：146 个文件级节点</div>
+      <div class="signal"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>CodeGraph：1,442 符号节点 / 3,797 关系</div>
+      <div class="signal"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg>确认：CLI、Flask 路由、Vue 前端、浏览器运行时与上传器</div>
+    </div>
+
+    <section id="architecture" aria-labelledby="architecture-title">
+      <div class="section-head"><div><div class="eyebrow">01 · system map</div><h2 id="architecture-title">运行路径</h2></div><p>点击节点查看职责与代表文件；点击层级筛选，专注对应区域。虚线表示主要控制或依赖方向，不代表每一条实现级调用。</p></div>
+      <div class="toolbar" role="toolbar" aria-label="架构层筛选">
+        <button class="filter" aria-pressed="true" data-filter="all">全部</button><button class="filter" aria-pressed="false" data-filter="frontend">管理前端</button><button class="filter" aria-pressed="false" data-filter="entry">入口与编排</button><button class="filter" aria-pressed="false" data-filter="upload">平台上传器</button><button class="filter" aria-pressed="false" data-filter="runtime">共享运行时</button><button class="filter" aria-pressed="false" data-filter="ops">支撑与验证</button>
+      </div>
+      <div class="map-wrap">
+        <div class="map" aria-label="应用架构关系图">
+          <svg class="flows" viewBox="0 0 900 660" preserveAspectRatio="none" aria-hidden="true"><defs><marker id="arrow" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto"><path d="M0 0 7 3.5 0 7z" fill="#8ba4c8"/></marker></defs><path marker-end="url(#arrow)" d="M160 150 C310 150,310 150,430 150"/><path marker-end="url(#arrow)" d="M160 420 C310 420,310 290,430 290"/><path marker-end="url(#arrow)" d="M450 215 C580 215,590 215,720 215"/><path marker-end="url(#arrow)" d="M450 360 C590 360,590 360,720 360"/><path marker-end="url(#arrow)" d="M720 300 C600 300,590 490,450 490"/></svg>
+          <div class="architecture">
+            <button class="node front" data-layer="frontend" data-title="管理前端" data-desc="Vue 3 管理端负责账号、素材与发布任务的可视化操作；通过请求层调用历史 Flask API。" data-files="sau_frontend/src/main.js|sau_frontend/src/App.vue|sau_frontend/src/utils/request.js"><span class="tag">Vue 管理端</span><h3>管理前端</h3><p>账号、素材、上传任务界面</p></button>
+            <button class="node entry" data-layer="entry" data-title="CLI 与应用编排" data-desc="sau_cli.py 是当前主线入口：解析平台、账号、素材和运行时参数，构造请求对象后调用对应 uploader。sau_backend.py 保留 Flask 管理接口。" data-files="sau_cli.py|sau_backend.py|myUtils/postVideo.py"><span class="tag">CLI · Flask</span><h3>入口与编排</h3><p>参数解析、任务分发、历史 API</p></button>
+            <button class="node upload" data-layer="upload" data-title="平台上传器" data-desc="平台差异被隔离在 uploader 包内。抖音、Bilibili、小红书、快手、视频号、YouTube 等模块各自实现页面流程，同时共享基础校验。" data-files="uploader/douyin_uploader/main.py|uploader/bilibili_uploader/main.py|uploader/xiaohongshu_uploader/main.py"><span class="tag">Platform adapters</span><h3>平台上传器</h3><p>发布页操作、平台字段与策略</p></button>
+            <button class="node runtime" data-layer="runtime" data-title="共享运行时" data-desc="BaseVideoUploader 统一媒体与发布时间校验；browser_runtime 统一启动 Chromium 或经 CDP 连接现有 Chrome，供多个平台复用。" data-files="uploader/base_video.py|utils/browser_runtime.py|utils/base_social_media.py"><span class="tag">Python · Browser</span><h3>共享运行时</h3><p>浏览器会话、账号状态、通用校验</p></button>
+            <button class="node ops" data-layer="ops" data-title="配置、测试与文档" data-desc="配置和 Dockerfile 描述本地运行方式；unittest 覆盖 CLI 与浏览器边界；文档、skills 与示例提供平台操作约定。" data-files="conf.example.py|Dockerfile|tests/test_sau_douyin_cli.py"><span class="tag">Support</span><h3>支撑与验证</h3><p>配置、容器、测试、文档与示例</p></button>
+            <button class="node upload" data-layer="upload" data-title="抖音发布子系统" data-desc="DouYinVideo 与 DouYinNote 执行视频或图文发布；支持 Cookie 登录态、CDP、合集、自主声明、封面与定时发布。" data-files="uploader/douyin_uploader/main.py|tests/test_sau_douyin_cli.py|examples/upload_to_douyin.py"><span class="tag">重点示例</span><h3>抖音 uploader</h3><p>CLI → Playwright/Chrome → 创作者后台</p></button>
+          </div>
+        </div>
+        <aside class="inspector" aria-live="polite"><p class="caption">INSPECTOR</p><h3 id="inspect-title">选择一个节点</h3><p id="inspect-desc">点击架构节点可以查看它在系统中的职责，以及代表性的本地文件。</p><ul class="file-list" id="inspect-files"><li>等待选择</li></ul><a class="button" id="open-file" href="#architecture" aria-label="打开所选源码文件"><svg viewBox="0 0 24 24"><path d="M14 3h7v7M10 14 21 3M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg>打开代表文件</a></aside>
+      </div>
+    </section>
+
+    <section aria-labelledby="layers-title"><div class="section-head"><div><div class="eyebrow">02 · ownership</div><h2 id="layers-title">文件归属层</h2></div><p>Understand Anything 为每个文件级节点分配唯一层级；CodeGraph 的代码索引用于验证核心层是否真的存在可达实现。</p></div>
+      <div class="layers" id="layers">
+        <article class="layer"><button data-filter-target="frontend"><span class="count">25 文件</span><h3>管理前端</h3><p>Vue 组件、路由、API 请求与样式。</p></button></article><article class="layer"><button data-filter-target="entry"><span class="count">4 文件</span><h3>应用入口与编排</h3><p>CLI、Flask 与发布调度入口。</p></button></article><article class="layer"><button data-filter-target="upload"><span class="count">24 文件</span><h3>平台上传器</h3><p>按平台封装发布页面行为。</p></button></article><article class="layer"><button data-filter-target="runtime"><span class="count">14 文件</span><h3>共享运行时</h3><p>浏览器、校验、日志与通用工具。</p></button></article><article class="layer"><button data-filter-target="ops"><span class="count">31 文件</span><h3>自动化工具与示例</h3><p>历史脚本、样例与辅助实现。</p></button></article><article class="layer"><button data-filter-target="ops"><span class="count">9 文件</span><h3>验证测试</h3><p>CLI、CDP、定时与平台回归测试。</p></button></article><article class="layer"><button data-filter-target="ops"><span class="count">34 文件</span><h3>文档与操作指南</h3><p>安装、CLI、skills 与方案说明。</p></button></article><article class="layer"><button data-filter-target="ops"><span class="count">5 文件</span><h3>配置与容器化</h3><p>运行配置、依赖与 Docker 构建。</p></button></article>
+      </div>
+    </section>
+
+    <section class="reading" aria-labelledby="tour-title"><article class="panel"><div class="eyebrow">03 · reading order</div><h2 id="tour-title">推荐阅读路线</h2><ol class="tour"><li>项目全貌<span>从 README 了解支持的平台、CLI 和运行方式。</span></li><li>命令行编排<span>阅读 sau_cli.py，理解请求对象如何进入 uploader。</span></li><li>共享发布基础<span>查看 BaseVideoUploader 与 browser_runtime 的复用边界。</span></li><li>抖音平台范例<span>查看 DouYinVideo、DouYinNote 和账号登录态处理。</span></li><li>管理端与交付<span>最后回看 Vue 前端、Flask API、数据库初始化与 Dockerfile。</span></li></ol></article><aside class="panel"><div class="eyebrow">04 · interpretation</div><h2>本图如何验证</h2><p class="note">图谱的 146 个文件级节点包含文档和配置；CodeGraph 的 89 个文件是可解析源码范围，因此两个数字不应相等。两者在关键入口上交叉吻合：<code>sau_cli.py</code>、<code>sau_backend.py</code>、<code>uploader/douyin_uploader/main.py</code> 与 <code>utils/browser_runtime.py</code>。</p></aside></section>
+    <footer>离线架构文件 · 不加载网络资源 · 数据快照：2026-08-24 · Git：0a2052b</footer>
+  </main>
+  <script>
+    const root = '/Users/yelin/Developer/agent-tools/social-auto-upload/';
+    const nodes = [...document.querySelectorAll('.node')];
+    const filters = [...document.querySelectorAll('.filter')];
+    const title = document.querySelector('#inspect-title'); const desc = document.querySelector('#inspect-desc'); const files = document.querySelector('#inspect-files'); const opener = document.querySelector('#open-file');
+    function selectNode(node) { nodes.forEach(n => n.classList.toggle('active', n === node)); title.textContent = node.dataset.title; desc.textContent = node.dataset.desc; const list = node.dataset.files.split('|'); files.innerHTML = list.map(file => `<li>${file}</li>`).join(''); opener.href = 'file://' + root + list[0]; opener.setAttribute('aria-label', `打开 ${list[0]}`); }
+    function filter(layer) { filters.forEach(b => b.setAttribute('aria-pressed', String(b.dataset.filter === layer))); nodes.forEach(node => node.classList.toggle('dim', layer !== 'all' && node.dataset.layer !== layer)); }
+    nodes.forEach(node => node.addEventListener('click', () => selectNode(node)));
+    filters.forEach(button => button.addEventListener('click', () => filter(button.dataset.filter)));
+    document.querySelectorAll('[data-filter-target]').forEach(button => button.addEventListener('click', () => { filter(button.dataset.filterTarget); document.querySelector('#architecture').scrollIntoView({behavior:'smooth'}); }));
+    selectNode(nodes[1]);
+  </script>
+</body>
+</html>
