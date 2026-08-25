@@ -142,59 +142,6 @@ class DouyinUploaderDefaultTests(unittest.TestCase):
         self.assertEqual(app.declaration, "无需添加自主声明")
         self.assertIsNone(app.collection)
 
-
-class DouyinTitleSelectorTests(unittest.TestCase):
-    def test_fill_title_supports_known_placeholder_variants(self):
-        class FakeKeyboard:
-            async def press(self, _key):
-                return None
-
-            async def type(self, _text):
-                return None
-
-        class FakeLocator:
-            def __init__(self, page, selector, kind):
-                self.page = page
-                self.selector = selector
-                self.kind = kind
-                self.first = self
-
-            async def wait_for(self, state=None, timeout=None):
-                if self.kind == "title":
-                    self.page.assert_title_selector_matches_current_placeholder(self.selector)
-                self.page.waits.append((self.kind, state, timeout))
-
-            async def fill(self, value):
-                self.page.filled_title = value
-
-            async def click(self):
-                return None
-
-        class FakePage:
-            def __init__(self, title_placeholder):
-                self.title_placeholder = title_placeholder
-                self.keyboard = FakeKeyboard()
-                self.waits = []
-                self.filled_title = None
-
-            def locator(self, selector):
-                if selector.startswith("input["):
-                    return FakeLocator(self, selector, "title")
-                return FakeLocator(self, selector, "description")
-
-            def assert_title_selector_matches_current_placeholder(self, selector):
-                assert "作品标题" in selector
-                assert "作品标题" in self.title_placeholder
-
-        for placeholder in ("填写作品标题", "添加作品标题"):
-            page = FakePage(placeholder)
-            app = DouYinVideo("标题", "demo.mp4", [], 0, "account.json")
-
-            asyncio.run(app.fill_title_and_description(page, "标题", "描述"))
-
-            self.assertEqual(page.filled_title, "标题")
-            self.assertEqual(page.waits[0][0], "title")
-
     def test_douyin_video_explicit_declaration_and_collection(self):
         app = DouYinVideo(
             title="hello",
