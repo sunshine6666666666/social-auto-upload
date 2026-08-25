@@ -624,9 +624,9 @@ class DouYinBaseUploader(BaseVideoUploader):
             )
 
     async def fill_title_and_description(self, page: Page, title: str, description: str, tags: list[str] | None = None):
-        # 2026-06 抖音发布页 DOM：标题=input[placeholder*=填写作品标题]，描述=div.zone-container[contenteditable]
+        # 抖音发布页标题 placeholder 在不同版本间使用“填写作品标题”或“添加作品标题”；描述仍为 contenteditable。
         # version_2(post/video) 发布页要等视频上传完才渲染表单（实测约 40s），故等待超时给到 120s
-        title_input = page.locator('input[placeholder*="填写作品标题"]').first
+        title_input = page.locator('input[placeholder*="作品标题"]').first
         await title_input.wait_for(state="visible", timeout=120000)
         await title_input.fill(title[:30])
 
