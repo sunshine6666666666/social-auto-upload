@@ -189,3 +189,9 @@ uploadFile
 videoFile
 
 /uploader/bilibili_uploader/qrcode.png
+
+# Local code indexes and account-operation artifacts
+/.codegraph/
+/.understand-anything/
+/qrcode.png
+/_devkeeper_*_smoke.png

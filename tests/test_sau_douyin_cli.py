@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import contextmanager
 import tempfile
 import unittest
 from argparse import Namespace
@@ -8,7 +9,13 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import sau_cli
-from uploader.douyin_uploader.main import DouYinVideo
+from uploader.douyin_uploader.main import (
+    DouYinVideo,
+    assert_douyin_publish_identity,
+    extract_douyin_identity,
+    extract_douyin_identity_from_context,
+    has_douyin_sms_challenge,
+)
 
 
 class DouyinCliTests(unittest.TestCase):
@@ -120,6 +127,10 @@ class DouyinCliTests(unittest.TestCase):
 
 
 class DouyinUploaderDefaultTests(unittest.TestCase):
+    def test_cdp_validation_does_not_require_cookie_file(self):
+        app = DouYinVideo("hello", "demo.mp4", [], 0, "missing.json", cdp_url="http://127.0.0.1:9225")
+        asyncio.run(app.validate_base_args())
+
     def test_douyin_video_default_declaration_is_no_declaration(self):
         app = DouYinVideo(
             title="hello",
@@ -143,6 +154,134 @@ class DouyinUploaderDefaultTests(unittest.TestCase):
         )
         self.assertEqual(app.declaration, "内容为个人观点或见解")
         self.assertEqual(app.collection, "英语新闻（训练版）")
+
+    def test_explicit_declaration_failure_blocks(self):
+        app = DouYinVideo("hello", "demo.mp4", [], 0, "account.json", declaration="无需添加自主声明")
+        app.set_self_declaration = AsyncMock(return_value=False)
+        with self.assertRaisesRegex(RuntimeError, "blocked"):
+            asyncio.run(app.apply_self_declaration(object()))
+
+
+class DouyinSafetyFlowTests(unittest.TestCase):
+    def test_sms_challenge_is_detected_without_reading_code(self):
+        locator = SimpleNamespace(count=AsyncMock(return_value=1), is_visible=AsyncMock(return_value=True))
+        page = SimpleNamespace(locator=lambda _selector: SimpleNamespace(first=locator))
+        self.assertTrue(asyncio.run(has_douyin_sms_challenge(page)))
+
+
+class DouyinIdentityTests(unittest.TestCase):
+    class Page:
+        url = "https://creator.douyin.com/creator-micro/home"
+
+        async def content(self):
+            return '{"uid":"douyin-123","nickname":"Creator"}'
+
+        async def title(self):
+            return "Creator"
+
+    def test_identity_uses_uid_not_nickname(self):
+        identity = asyncio.run(extract_douyin_identity(self.Page(), browser_name="managed", cdp_port=9225))
+        self.assertEqual(identity.stable_id, "douyin-123")
+        self.assertEqual(identity.browser_name, "managed")
+        self.assertEqual(identity.cdp_port, 9225)
+
+    def test_identity_change_blocks_before_publish(self):
+        expected = asyncio.run(extract_douyin_identity(self.Page()))
+
+        class ChangedPage(self.Page):
+            async def content(self):
+                return '{"uid":"douyin-999"}'
+
+        with self.assertRaisesRegex(RuntimeError, "blocked"):
+            asyncio.run(assert_douyin_publish_identity(ChangedPage(), expected))
+
+    def test_context_identity_uses_home_page_and_closes_it(self):
+        page = self.Page()
+        page.goto = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        page.close = AsyncMock()
+        context = SimpleNamespace(new_page=AsyncMock(return_value=page))
+
+        identity = asyncio.run(extract_douyin_identity_from_context(context))
+
+        self.assertEqual(identity.stable_id, "douyin-123")
+        page.goto.assert_awaited_once_with(
+            "https://creator.douyin.com/creator-micro/home",
+            wait_until="domcontentloaded",
+            timeout=90000,
+        )
+        page.close.assert_awaited_once()
+
+    def test_context_identity_uses_session_background_page_when_available(self):
+        page = self.Page()
+        page.goto = AsyncMock()
+        page.wait_for_timeout = AsyncMock()
+        page.close = AsyncMock()
+        context = SimpleNamespace(new_page=AsyncMock())
+        session = SimpleNamespace(new_task_page=AsyncMock(return_value=page))
+
+        identity = asyncio.run(extract_douyin_identity_from_context(context, session=session))
+
+        self.assertEqual(identity.stable_id, "douyin-123")
+        session.new_task_page.assert_awaited_once_with()
+        context.new_page.assert_not_awaited()
+
+    def test_identity_reads_visible_handle_and_adjacent_account_name(self):
+        class VisiblePage:
+            url = "https://creator.douyin.com/creator-micro/home"
+
+            async def content(self):
+                return '<title>抖音创作者中心</title>'
+
+            async def title(self):
+                return "抖音创作者中心"
+
+            def locator(self, selector):
+                return SimpleNamespace(inner_text=AsyncMock(return_value="水蜜桃英语\n抖音号：202851389"))
+
+        page = VisiblePage()
+        identity = asyncio.run(extract_douyin_identity(page))
+        self.assertTrue(identity.logged_in)
+        self.assertEqual(identity.stable_id, "202851389")
+        self.assertEqual(identity.display_name, "水蜜桃英语")
+
+    def test_identity_accepts_half_width_colon_and_does_not_use_generic_title(self):
+        class VisiblePage(self.Page):
+            async def content(self):
+                return '<title>抖音创作者中心</title>'
+
+            def locator(self, _selector):
+                return SimpleNamespace(inner_text=AsyncMock(return_value="水蜜桃英语\n抖音号 : 202851389"))
+
+            async def title(self):
+                return "抖音创作者中心"
+
+        identity = asyncio.run(extract_douyin_identity(VisiblePage()))
+        self.assertEqual(identity.stable_id, "202851389")
+        self.assertEqual(identity.display_name, "水蜜桃英语")
+
+    def test_identity_without_visible_or_structured_id_is_logged_out(self):
+        class LoggedOutPage(self.Page):
+            async def content(self):
+                return "<html>手机号登录</html>"
+
+            def locator(self, _selector):
+                return SimpleNamespace(inner_text=AsyncMock(return_value="手机号登录"))
+
+        identity = asyncio.run(extract_douyin_identity(LoggedOutPage()))
+        self.assertFalse(identity.logged_in)
+        self.assertIsNone(identity.stable_id)
+
+    def test_identity_conflicting_visible_and_page_data_ids_blocks(self):
+        class ConflictingPage(self.Page):
+            async def content(self):
+                return '{"uid":"100"}'
+
+            def locator(self, _selector):
+                return SimpleNamespace(inner_text=AsyncMock(return_value="水蜜桃英语\n抖音号：200"))
+
+        with self.assertRaisesRegex(RuntimeError, "conflicting"):
+            asyncio.run(extract_douyin_identity(ConflictingPage()))
 
 
 class DouyinScheduleTests(unittest.TestCase):
@@ -254,6 +393,59 @@ class DouyinScheduleTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             asyncio.run(run())
         self.assertIn("回读核验失败", str(ctx.exception))
+
+
+class DouyinLargeFileInputTests(unittest.TestCase):
+    @contextmanager
+    def _app_and_page(self, cdp_url=None):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as video:
+            app = DouYinVideo("hello", video.name, [], 0, "account.json", cdp_url=cdp_url)
+            from unittest.mock import MagicMock
+            page = MagicMock()
+            locator = MagicMock()
+            locator.set_input_files = AsyncMock()
+            page.locator.return_value = locator
+            yield app, page, video.name, locator
+
+    def test_large_cdp_first_upload_uses_local_file_helper(self):
+        with self._app_and_page("http://127.0.0.1:9225") as values:
+            app, page, path, locator = values
+            with patch("uploader.douyin_uploader.main.requires_local_cdp_file_input", return_value=True), patch(
+                "uploader.douyin_uploader.main.set_local_file_input_via_cdp", new=AsyncMock()
+            ) as helper:
+                asyncio.run(app.set_video_file_input(page, "div[class^='container'] input"))
+            helper.assert_awaited_once_with(page, "div[class^='container'] input", path)
+            locator.set_input_files.assert_not_awaited()
+
+    def test_large_cdp_retry_uses_local_file_helper(self):
+        with self._app_and_page("http://127.0.0.1:9225") as values:
+            app, page, path, locator = values
+            with patch("uploader.douyin_uploader.main.requires_local_cdp_file_input", return_value=True), patch(
+                "uploader.douyin_uploader.main.set_local_file_input_via_cdp", new=AsyncMock()
+            ) as helper:
+                asyncio.run(app.handle_upload_error(page))
+            helper.assert_awaited_once_with(page, 'div.progress-div [class^="upload-btn-input"]', path)
+            locator.set_input_files.assert_not_awaited()
+
+    def test_small_file_uses_locator_input(self):
+        with self._app_and_page("http://127.0.0.1:9225") as values:
+            app, page, path, locator = values
+            with patch("uploader.douyin_uploader.main.requires_local_cdp_file_input", return_value=False), patch(
+                "uploader.douyin_uploader.main.set_local_file_input_via_cdp", new=AsyncMock()
+            ) as helper:
+                asyncio.run(app.set_video_file_input(page, "input[type='file']"))
+            locator.set_input_files.assert_awaited_once_with(path)
+            helper.assert_not_awaited()
+
+    def test_non_cdp_large_file_uses_locator_input(self):
+        with self._app_and_page() as values:
+            app, page, path, locator = values
+            with patch("uploader.douyin_uploader.main.requires_local_cdp_file_input", return_value=False), patch(
+                "uploader.douyin_uploader.main.set_local_file_input_via_cdp", new=AsyncMock()
+            ) as helper:
+                asyncio.run(app.set_video_file_input(page, "input[type='file']"))
+            locator.set_input_files.assert_awaited_once_with(path)
+            helper.assert_not_awaited()
 
 
 if __name__ == "__main__":

@@ -2,9 +2,11 @@ import asyncio
 import tempfile
 import unittest
 from argparse import Namespace
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfo
 
 import sau_cli
 
@@ -198,3 +200,25 @@ class BilibiliCliTests(unittest.TestCase):
                 asyncio.run(sau_cli.upload_bilibili_video(request))
 
         self.assertNotIn("--extra-fields", run_biliup.call_args.args[0])
+
+    def test_naive_schedule_is_converted_from_shanghai_before_biliup(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            account_file = Path(temp_dir) / "account.json"
+            account_file.write_text("{}", encoding="utf-8")
+            request = sau_cli.BilibiliVideoUploadRequest(
+                account_name="creator",
+                video_file=Path("demo.mp4"),
+                title="hello",
+                description="hello",
+                tid=249,
+                tags=[],
+                publish_date=datetime(2026, 8, 29, 20, 0),
+            )
+            with patch("sau_cli.resolve_account_file", return_value=account_file), patch(
+                "sau_cli.run_biliup_command",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ) as run_biliup:
+                asyncio.run(sau_cli.upload_bilibili_video(request))
+        args = run_biliup.call_args.args[0]
+        expected = int(datetime(2026, 8, 29, 20, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+        self.assertEqual(args[args.index("--dtime") + 1], str(expected))

@@ -26,8 +26,10 @@ from utils.log import youtube_logger
 from utils.browser_runtime import (
     open_browser_session,
     requires_local_cdp_file_input,
+    save_storage_state_if_owned,
     set_local_file_input_via_cdp,
 )
+from utils.account_identity import AccountIdentity, assert_same_publish_identity, identity_matches, require_publish_identity
 
 try:
     # 国内直连 youtube.com 会超时，且 patchright 启的 chromium 不吃系统代理。
@@ -46,6 +48,10 @@ SCHEDULE_BUTTON_SELECTOR = (
     "ytcp-button:has-text('预定'), ytcp-button:has-text('安排'), "
     "[aria-label*='Schedule'], [aria-label*='安排'], [aria-label*='预定']"
 )
+
+
+def _youtube_context_kwargs(account_file: str, cdp_url: str | None) -> dict[str, str]:
+    return {} if cdp_url else {"storage_state": account_file}
 
 
 def _msg(emoji: str, text: str) -> str:
@@ -138,6 +144,24 @@ def parse_scheduled_publish_readback(
     }
 
 
+def extract_youtube_draft_reference(html: str) -> dict[str, str]:
+    """Extract a video-only draft reference without mistaking a channel ID for it."""
+    patterns = (
+        r"(?:[\"']video-id[\"']|\bvideo-id)\s*[:=]\s*[\"']([A-Za-z0-9_-]{11})[\"']",
+        r"[\"']videoId[\"']\s*:\s*[\"']([A-Za-z0-9_-]{11})[\"']",
+        r"(?:youtu\.be/|watch\?v=)([A-Za-z0-9_-]{11})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, html)
+        if match:
+            video_id = match.group(1)
+            return {
+                "videoId": video_id,
+                "publishUrl": f"https://www.youtube.com/watch?v={video_id}",
+            }
+    return {}
+
+
 async def readback_scheduled_publication(
     page: Page,
     *,
@@ -159,10 +183,14 @@ async def readback_scheduled_publication(
             last_error = exc
 
         if not navigated_to_edit:
-            video_match = re.search(r"(?:youtu\.be/|watch\?v=)([A-Za-z0-9_-]{11})", html)
+            video_match = re.search(
+                r"(?:youtu\.be/|watch\?v=)([A-Za-z0-9_-]{11})|video-id=[\"']([A-Za-z0-9_-]{11})[\"']",
+                html,
+            )
             if video_match:
+                video_id = video_match.group(1) or video_match.group(2)
                 await page.goto(
-                    f"{STUDIO_URL}/video/{video_match.group(1)}/edit", wait_until="domcontentloaded"
+                    f"{STUDIO_URL}/video/{video_id}/edit", wait_until="domcontentloaded"
                 )
                 navigated_to_edit = True
                 continue
@@ -189,22 +217,120 @@ async def cookie_auth(account_file, cdp_url: str | None = None) -> bool:
             playwright,
             cdp_url=cdp_url,
             launch_kwargs={"headless": True, "channel": "chrome"},
-            context_kwargs={"storage_state": account_file},
+            context_kwargs=_youtube_context_kwargs(account_file, cdp_url),
         )
         try:
             context = session.context
             context = await set_init_script(context)
-            page = await context.new_page()
+            page = await session.new_task_page()
             await page.goto(STUDIO_URL, wait_until="domcontentloaded")
             await page.wait_for_timeout(3000)
-            url = page.url
-            if "accounts.google.com" in url or "/signin" in url.lower():
-                return False
-            return "/channel/" in url
+            identity = await extract_youtube_identity(page)
+            return identity.logged_in and bool(identity.stable_id)
         except Exception:
             return False
         finally:
             await session.close()
+
+
+async def extract_youtube_identity(page: Page, *, browser_name: str | None = None, cdp_port: int | None = None) -> AccountIdentity:
+    """Extract channel identity from the current Studio page, never from an account filename."""
+    html = await page.content()
+    url = page.url
+    stable_id = None
+    for pattern, source in (
+        (r"/channel/(UC[A-Za-z0-9_-]+)", url),
+        (r'"(?:channelId|externalId|ownerChannelId)"\s*:\s*"(UC[A-Za-z0-9_-]+)"', html),
+    ):
+        match = re.search(pattern, source)
+        if match:
+            stable_id = match.group(1)
+            break
+    handle_match = re.search(r"/@([A-Za-z0-9._-]+)", url)
+    display_name = None
+    try:
+        channel_text = await page.locator(".thumbnail-wrapper-channel").first.inner_text()
+        names = [line.strip() for line in channel_text.splitlines() if line.strip()]
+        display_name = next((line for line in reversed(names) if line not in {"我的频道", "Your channel"}), None)
+    except Exception:
+        pass
+    logged_in = bool(stable_id) and "accounts.google.com" not in url and "/signin" not in url.lower()
+    return AccountIdentity(
+        platform="youtube",
+        logged_in=logged_in,
+        stable_id=stable_id,
+        display_name=display_name,
+        handle=f"@{handle_match.group(1)}" if handle_match else None,
+        profile_url=f"https://www.youtube.com/channel/{stable_id}" if stable_id else None,
+        browser_name=browser_name,
+        cdp_port=cdp_port,
+        extra={},
+    )
+
+
+async def get_youtube_account_identity(
+    cdp_url: str | None = None,
+    *,
+    browser_name: str | None = None,
+    cdp_port: int | None = None,
+) -> AccountIdentity:
+    try:
+        async with async_playwright() as playwright:
+            session = await open_browser_session(
+                playwright,
+                cdp_url=cdp_url,
+                launch_kwargs={"headless": True, "channel": "chrome"},
+            )
+            try:
+                context = await set_init_script(session.context)
+                page = await session.new_task_page()
+                await page.goto(STUDIO_URL, wait_until="domcontentloaded")
+                await page.wait_for_timeout(2500)
+                return await extract_youtube_identity(page, browser_name=browser_name, cdp_port=cdp_port)
+            finally:
+                await session.close()
+    except Exception:
+        if not cdp_url:
+            raise
+        from utils.direct_cdp import read_page_snapshot
+
+        try:
+            snapshot = await asyncio.to_thread(read_page_snapshot, cdp_url, STUDIO_URL)
+            url = str(snapshot.get("url", ""))
+            html = str(snapshot.get("html", ""))
+            stable_id = None
+            for pattern, source in (
+                (r"/channel/(UC[A-Za-z0-9_-]+)", url),
+                (r'"(?:channelId|externalId|ownerChannelId)"\s*:\s*"(UC[A-Za-z0-9_-]+)"', html),
+            ):
+                match = re.search(pattern, source)
+                if match:
+                    stable_id = match.group(1)
+                    break
+            handle_match = re.search(r"/@([A-Za-z0-9._-]+)", url)
+            return AccountIdentity(
+                platform="youtube",
+                logged_in=bool(stable_id) and "accounts.google.com" not in url and "/signin" not in url.lower(),
+                stable_id=stable_id,
+                display_name=str(snapshot.get("youtubeChannelName", "")).strip() or None,
+                handle=f"@{handle_match.group(1)}" if handle_match else None,
+                profile_url=f"https://www.youtube.com/channel/{stable_id}" if stable_id else None,
+                browser_name=browser_name,
+                cdp_port=cdp_port,
+                extra={"identity_transport": "direct-cdp"},
+            )
+        except Exception as direct_exc:
+            raise RuntimeError("YouTube identity could not be read from Patchright or direct CDP") from direct_exc
+
+
+async def assert_youtube_publish_identity(page: Page, expected: AccountIdentity) -> AccountIdentity:
+    observed = await extract_youtube_identity(
+        page,
+        browser_name=expected.browser_name,
+        cdp_port=expected.cdp_port,
+    )
+    assert_same_publish_identity(expected, observed)
+    return observed
 
 
 async def youtube_cookie_gen(account_file, headless: bool = False, cdp_url: str | None = None):
@@ -217,7 +343,7 @@ async def youtube_cookie_gen(account_file, headless: bool = False, cdp_url: str 
         )
         context = session.context
         context = await set_init_script(context)
-        page = await context.new_page()
+        page = await session.new_task_page()
         await page.goto(STUDIO_URL, wait_until="domcontentloaded")
         youtube_logger.info(_msg("🔐", "请在浏览器里登录 Google / YouTube 账号，登录后会自动保存"))
         ok = False
@@ -228,11 +354,13 @@ async def youtube_cookie_gen(account_file, headless: bool = False, cdp_url: str 
                 break
             await asyncio.sleep(1)
         if ok:
-            await context.storage_state(path=account_file)
-            youtube_logger.success(_msg("✅", f"YouTube 登录态已保存: {account_file}"))
+            if await save_storage_state_if_owned(session, account_file):
+                youtube_logger.success(_msg("✅", f"YouTube 登录态已保存: {account_file}"))
+            else:
+                youtube_logger.success(_msg("✅", "YouTube 登录态由当前 CDP 浏览器 Profile 持久保存"))
         else:
             youtube_logger.error(_msg("😵", "等待登录超时，未保存登录态"))
-        await session.close()
+        await session.close(success=ok)
         return _build_login_result(ok, "logged_in" if ok else "timeout",
                                    "登录成功" if ok else "登录超时", account_file, page.url)
 
@@ -245,7 +373,7 @@ async def youtube_setup(
     cdp_url: str | None = None,
 ):
     """校验登录态，失效且 handle=True 时拉起交互式登录。"""
-    if not Path(account_file).exists() or not await cookie_auth(account_file, cdp_url=cdp_url):
+    if (not cdp_url and not Path(account_file).exists()) or not await cookie_auth(account_file, cdp_url=cdp_url):
         if not handle:
             result = _build_login_result(False, "cookie_invalid", "登录态不存在或已失效", account_file)
             return result if return_detail else False
@@ -297,10 +425,28 @@ async def _click_if_present(page: Page, selector: str, timeout: int = 4000) -> b
     try:
         el = page.locator(selector).first
         await el.wait_for(state="visible", timeout=timeout)
+        if selector == "#done-button":
+            inner = el.locator("button").first
+            if await inner.count():
+                el = inner
+        if hasattr(el, "is_enabled") and not await el.is_enabled():
+            return False
         await el.click()
         return True
     except Exception:
         return False
+
+
+async def _click_required_final_button(page: Page, action: str) -> None:
+    selectors = ["#done-button"]
+    if action == "Schedule":
+        selectors.extend(("button:has-text('预定')", "button:has-text('Schedule')"))
+    else:
+        selectors.append(f"button:has-text('{action}')")
+    for selector in selectors:
+        if await _click_if_present(page, selector, 15000):
+            return
+    raise RuntimeError(f"YouTube Studio did not expose the final {action} button")
 
 
 async def wait_for_schedule_control(page: Page, *, timeout_ms: int = 30 * 60 * 1000, poll_ms: int = 5000) -> None:
@@ -389,7 +535,9 @@ class YouTubeVideo(BaseVideoUploader):
     def __init__(self, title, file_path, tags, account_file, *,
                  description="", thumbnail_path=None, playlist=None,
                  visibility="public", debug=DEBUG_MODE, headless=False, cdp_url: str | None = None,
-                 submit: bool = True, schedule: datetime | None = None, timezone: str = "Asia/Shanghai"):
+                 submit: bool = True, schedule: datetime | None = None, timezone: str = "Asia/Shanghai",
+                 browser_name: str | None = None, cdp_port: int | None = None,
+                 target_account: str | None = None):
         self.title = title
         self.file_path = str(file_path)
         self.tags = tags or []
@@ -404,6 +552,11 @@ class YouTubeVideo(BaseVideoUploader):
         self.submit = submit
         self.schedule = schedule
         self.timezone = timezone
+        self.browser_name = browser_name
+        self.cdp_port = cdp_port
+        self.target_account = target_account
+        self._active_session = None
+        self._upload_succeeded = False
 
     async def upload(self, playwright: Playwright) -> dict[str, str | int | bool]:
         session = await open_browser_session(
@@ -414,17 +567,24 @@ class YouTubeVideo(BaseVideoUploader):
                 "channel": "chrome",
                 "proxy": {"server": YT_PROXY} if YT_PROXY else None,
             },
-            context_kwargs={"storage_state": self.account_file},
+            context_kwargs=_youtube_context_kwargs(self.account_file, self.cdp_url),
         )
+        self._active_session = session
         context = await set_init_script(session.context)
-        page = await context.new_page()
+        page = await session.new_task_page()
         page.set_default_timeout(60000)
 
         youtube_logger.info(_msg("🎬", f"开始上传: {Path(self.file_path).name}"))
+        await page.goto(STUDIO_URL, wait_until="domcontentloaded")
+        expected_identity = await extract_youtube_identity(
+            page, browser_name=self.browser_name, cdp_port=self.cdp_port
+        )
+        require_publish_identity(expected_identity)
+        if self.target_account and not identity_matches(expected_identity, self.target_account):
+            raise RuntimeError("blocked publish identity: target account does not match YouTube page")
         await page.goto(UPLOAD_URL, wait_until="domcontentloaded")
         await page.wait_for_timeout(3000)
         if "accounts.google.com" in page.url or "signin" in page.url.lower():
-            await session.close()
             raise RuntimeError("YouTube 登录态失效，请重新执行 login")
 
         # 1) 选择视频文件
@@ -525,8 +685,28 @@ class YouTubeVideo(BaseVideoUploader):
             youtube_logger.success(_msg("🛑", "已到达发布前页面，按 --no-submit 停止"))
         elif self.schedule:
             await _configure_scheduled_publication(page, self.schedule, self.timezone)
-            if not await _click_if_present(page, "#done-button", 15000):
-                raise RuntimeError("YouTube Studio did not expose the final Schedule button")
+            await assert_youtube_publish_identity(page, expected_identity)
+            try:
+                await _click_required_final_button(page, "Schedule")
+            except RuntimeError:
+                draft = {}
+                try:
+                    draft = extract_youtube_draft_reference(await page.content())
+                except Exception:
+                    pass
+                return {
+                    "status": "interaction_required",
+                    "platform": "youtube",
+                    "reason": "final_schedule_button_missing",
+                    "recoverable": True,
+                    "submitted": False,
+                    "browser_name": self.browser_name,
+                    "cdp_port": self.cdp_port,
+                    "stable_id": expected_identity.stable_id,
+                    "focus_fallback_used": session.focus_fallback_used,
+                    **draft,
+                }
+            await page.locator("ytcp-uploads-dialog").first.wait_for(state="hidden", timeout=20000)
             await page.wait_for_timeout(4000)
             result = await readback_scheduled_publication(
                 page, expected_schedule=self.schedule, timezone=self.timezone
@@ -534,31 +714,45 @@ class YouTubeVideo(BaseVideoUploader):
             youtube_logger.success(_msg("🗓️", f"Studio 原生预约已核验: {result['publishUrl']}"))
             await _click_if_present(page, "ytcp-button:has-text('Close'), ytcp-button:has-text('关闭'), #close-button", 8000)
         else:
+            await assert_youtube_publish_identity(page, expected_identity)
             await page.wait_for_timeout(1200)
-            if not await _click_if_present(page, "#done-button", 15000):
-                youtube_logger.warning(_msg("🤔", "未找到发布按钮，可能上传未到可发布进度；请在窗口里手动发布"))
-            else:
-                await page.wait_for_timeout(4000)
-                video_url = ""
-                try:
-                    link = page.locator("a[href*='youtu.be'], a[href*='watch?v=']").first
-                    if await link.count():
-                        video_url = await link.get_attribute("href") or ""
-                except Exception:
-                    pass
-                result["publishUrl"] = video_url
-                await _click_if_present(page, "ytcp-button:has-text('Close'), ytcp-button:has-text('关闭'), #close-button", 8000)
-                youtube_logger.success(_msg("🥳", f"发布完成（{self.visibility}）{(' ' + video_url) if video_url else ''}"))
+            await _click_required_final_button(page, "Publish")
+            await page.locator("ytcp-uploads-dialog").first.wait_for(state="hidden", timeout=20000)
+            await page.wait_for_timeout(4000)
+            video_url = ""
+            try:
+                link = page.locator("a[href*='youtu.be'], a[href*='watch?v=']").first
+                if await link.count():
+                    video_url = await link.get_attribute("href") or ""
+            except Exception:
+                pass
+            result["publishUrl"] = video_url
+            await _click_if_present(page, "ytcp-button:has-text('Close'), ytcp-button:has-text('关闭'), #close-button", 8000)
+            youtube_logger.success(_msg("🥳", f"发布完成（{self.visibility}）{(' ' + video_url) if video_url else ''}"))
 
         # 刷新 cookie
         try:
-            await context.storage_state(path=self.account_file)
+            await save_storage_state_if_owned(session, self.account_file)
         except Exception:
             pass
         await page.wait_for_timeout(2000)
-        await session.close()
+        result.update(
+            {
+                "status": "success",
+                "platform": "youtube",
+                "browser_name": self.browser_name,
+                "cdp_port": self.cdp_port,
+                "stable_id": expected_identity.stable_id,
+                "focus_fallback_used": session.focus_fallback_used,
+            }
+        )
+        self._upload_succeeded = True
         return result
 
     async def main(self):
         async with async_playwright() as playwright:
-            return await self.upload(playwright)
+            try:
+                return await self.upload(playwright)
+            finally:
+                if self._active_session is not None:
+                    await self._active_session.close(success=self._upload_succeeded)

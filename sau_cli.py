@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import io
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -21,11 +24,15 @@ except Exception:
     YT_MAX_DURATION_SECONDS = 900
 from uploader.bilibili_uploader.runtime import (
     add_archive_to_season,
+    export_bilibili_cdp_account,
+    get_bilibili_cdp_identity,
     fetch_bilibili_archive_cid,
     find_bilibili_archive_aid,
+    read_bilibili_archive_matches,
     resolve_bilibili_season_id,
     resolve_bilibili_section_id,
     run_biliup_command,
+    read_bilibili_account_identity,
 )
 from uploader.douyin_uploader.main import (
     DOUYIN_PUBLISH_STRATEGY_IMMEDIATE,
@@ -34,6 +41,7 @@ from uploader.douyin_uploader.main import (
     DouYinVideo,
     cookie_auth as douyin_cookie_auth,
     douyin_setup,
+    get_douyin_account_identity,
 )
 from uploader.ks_uploader.main import (
     KUAISHOU_PUBLISH_STRATEGY_IMMEDIATE,
@@ -61,7 +69,16 @@ from uploader.xiaohongshu_uploader.main import (
 from uploader.youtube_uploader.main import (
     YouTubeVideo,
     cookie_auth as youtube_cookie_auth,
+    get_youtube_account_identity,
     youtube_setup,
+)
+from utils.browser_selector import resolve_browser_target, resolve_browser_targets
+from utils.browser_runtime import begin_task, browser_task_lock, finish_task
+from utils.account_identity import (
+    assert_same_publish_identity,
+    identity_matches,
+    observation_status,
+    require_publish_identity,
 )
 
 SCHEDULE_FORMAT = "%Y-%m-%d %H:%M"
@@ -86,6 +103,9 @@ class DouyinVideoUploadRequest:
     cdp_url: str | None = None
     declaration: str = "无需添加自主声明"
     collection: str | None = None
+    browser_name: str | None = None
+    cdp_port: int | None = None
+    target_account: str | None = None
 
 
 @dataclass(slots=True)
@@ -174,6 +194,11 @@ class BilibiliVideoUploadRequest:
     thumbnail_file: Path | None = None
     charging_pay: bool = False
     collection: str | None = None
+    cdp_url: str | None = None
+    browser_name: str | None = None
+    cdp_port: int | None = None
+    target_account: str | None = None
+    focus_fallback_used: bool = False
 
 
 @dataclass(slots=True)
@@ -212,6 +237,9 @@ class YouTubeVideoUploadRequest:
     submit: bool = True
     schedule: datetime | None = None
     timezone: str = "Asia/Shanghai"
+    browser_name: str | None = None
+    cdp_port: int | None = None
+    target_account: str | None = None
 
 
 def has_interactive_terminal() -> bool:
@@ -250,16 +278,191 @@ def parse_schedule(raw_schedule: str | None) -> datetime | int:
     return datetime.strptime(raw_schedule, SCHEDULE_FORMAT)
 
 
+def _sanitized_identity_error(exc: Exception) -> str:
+    message = str(exc).strip() or exc.__class__.__name__
+    if re.search(r"cookie|token|csrf|authorization|password", message, re.IGNORECASE):
+        return "identity extraction failed"
+    return re.sub(r"\s+", " ", message)[:240]
+
+
+async def _read_platform_identity(platform: str, target):
+    if platform == "douyin":
+        return await get_douyin_account_identity(
+            cdp_url=target.cdp_url, browser_name=target.name, cdp_port=target.port
+        )
+    if platform == "youtube":
+        return await get_youtube_account_identity(
+            cdp_url=target.cdp_url, browser_name=target.name, cdp_port=target.port
+        )
+    if platform == "bilibili":
+        return await get_bilibili_cdp_identity(target.cdp_url, target)
+    raise ValueError(f"unsupported scan platform: {platform}")
+
+
+async def _scan_identity(platform: str, target) -> dict:
+    try:
+        identity = await _read_platform_identity(platform, target)
+        return {
+            "status": observation_status(identity),
+            "platform": platform,
+            "browser_name": target.name,
+            "cdp_port": target.port,
+            "identity": identity.to_dict(),
+            "reason": None if identity.logged_in else "login_required",
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "platform": platform,
+            "browser_name": target.name,
+            "cdp_port": target.port,
+            "identity": {},
+            "reason": _sanitized_identity_error(exc),
+        }
+
+
+async def scan_accounts(selectors: Sequence[str], platforms: Sequence[str]) -> dict:
+    targets = resolve_browser_targets(selectors)
+    items = []
+    for target in targets:
+        for platform in platforms:
+            items.append(await _scan_identity(platform, target))
+    summary = {status: sum(item["status"] == status for item in items) for status in ("logged_in", "interaction_required", "error")}
+    summary["total"] = len(items)
+    return {"items": items, "summary": summary}
+
+
+async def _resolve_upload_target(args):
+    selectors = [item.strip() for item in (getattr(args, "browsers", "") or "").split(",") if item.strip()]
+    if not selectors:
+        return resolve_browser_target(getattr(args, "browser", None), getattr(args, "cdp_url", None))
+    targets = resolve_browser_targets(selectors)
+    if not targets:
+        raise RuntimeError("no browser target resolved")
+    selector = getattr(args, "target_account", None)
+    if len(targets) > 1 and not selector:
+        raise ValueError("multiple browser targets require --target-account")
+    if not selector:
+        return targets[0]
+    matches = []
+    for candidate in targets:
+        identity = await _read_platform_identity(args.platform, candidate)
+        if identity.logged_in and identity_matches(identity, selector):
+            matches.append(candidate)
+    if len(matches) != 1:
+        raise RuntimeError(f"target account matched {len(matches)} browser targets; expected exactly one")
+    return matches[0]
+
+
+def _batch_output(stdout: str, stderr: str, exit_code: int) -> dict:
+    combined = "\n".join(part for part in (stdout, stderr) if part).strip()
+    if re.search(r"cookie|token|csrf|authorization|password", combined, re.IGNORECASE):
+        message = "child output redacted"
+    else:
+        message = combined.splitlines()[-1][:400] if combined else ""
+    return {"status": "success" if exit_code == 0 else "error", "exit_code": exit_code, "message": message}
+
+
+def _validate_batch_manifest(path: Path) -> list[tuple[str, list[str], argparse.Namespace]]:
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("batch manifest is not valid JSON") from exc
+    if not isinstance(manifest, dict) or set(manifest) != {"tasks"} or not isinstance(manifest["tasks"], list):
+        raise ValueError("batch manifest must contain only a tasks list")
+    parser = build_parser()
+    seen = set()
+    tasks = []
+    for item in manifest["tasks"]:
+        if not isinstance(item, dict) or set(item) != {"id", "argv"}:
+            raise ValueError("each batch task must contain only id and argv")
+        task_id = item["id"]
+        argv = item["argv"]
+        if not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,128}", task_id) or task_id in seen:
+            raise ValueError("batch task IDs must be unique and match [A-Za-z0-9._-]{1,128}")
+        if not isinstance(argv, list) or not argv or any(not isinstance(value, str) for value in argv):
+            raise ValueError("batch task argv must be a nonempty string list")
+        if argv[0] == "batch":
+            raise ValueError("nested batch tasks are not allowed")
+        try:
+            child_args = parser.parse_args(argv)
+        except SystemExit as exc:
+            raise ValueError(f"invalid argv for batch task {task_id}") from exc
+        if child_args.platform == "batch":
+            raise ValueError("nested batch tasks are not allowed")
+        seen.add(task_id)
+        tasks.append((task_id, argv, child_args))
+    return tasks
+
+
+def _batch_ports(args) -> list[int]:
+    browser = getattr(args, "browser", None)
+    browsers = getattr(args, "browsers", None)
+    cdp_url = getattr(args, "cdp_url", None)
+    if sum(bool(value) for value in (browser, browsers, cdp_url)) > 1:
+        raise ValueError("--browser, --browsers and --cdp-url cannot be used together")
+    if browsers:
+        targets = resolve_browser_targets(
+            [value.strip() for value in browsers.split(",") if value.strip()]
+        )
+    else:
+        target = resolve_browser_target(browser, cdp_url)
+        targets = [target] if target is not None else []
+    return list(dict.fromkeys(target.port for target in targets))
+
+
+async def dispatch_batch(path: Path) -> int:
+    tasks = _validate_batch_manifest(path)
+    items = []
+    has_failed = False
+    for task_id, argv, child_args in tasks:
+        prior = begin_task(task_id, argv)
+        if prior["state"] != "started":
+            if prior["state"] == "failed":
+                has_failed = True
+            items.append({"id": task_id, "state": prior["state"], "result": prior["result"]})
+            continue
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        try:
+            with contextlib.ExitStack() as stack:
+                for port in _batch_ports(child_args):
+                    stack.enter_context(browser_task_lock(port))
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    exit_code = await dispatch(child_args)
+            result = _batch_output(stdout.getvalue(), stderr.getvalue(), exit_code)
+            if exit_code:
+                has_failed = True
+                finish_task(task_id, {**result, "task_state": "failed"})
+                state = "failed"
+            else:
+                finish_task(task_id, result)
+                state = "complete"
+        except asyncio.TimeoutError as exc:
+            result = {"status": "error", "message": "task outcome is uncertain"}
+            finish_task(task_id, {**result, "task_state": "uncertain"})
+            state = "uncertain"
+        except Exception as exc:
+            message = _sanitized_identity_error(exc)
+            result = {"status": "error", "message": message}
+            finish_task(task_id, {**result, "task_state": "failed"})
+            has_failed = True
+            state = "failed"
+        items.append({"id": task_id, "state": state, "result": result})
+    print(json.dumps({"items": items, "failed": has_failed}, ensure_ascii=False, sort_keys=True))
+    return 1 if has_failed else 0
+
+
 async def login_douyin_account(account_name: str, headless: bool = True, cdp_url: str | None = None) -> dict:
     account_file = resolve_account_file("douyin", account_name)
     return await douyin_setup(str(account_file), handle=True, return_detail=True, headless=headless, cdp_url=cdp_url)
 
 
-async def check_douyin_account(account_name: str) -> bool:
+async def check_douyin_account(account_name: str, cdp_url: str | None = None) -> bool:
     account_file = resolve_account_file("douyin", account_name)
-    if not account_file.exists():
+    if not cdp_url and not account_file.exists():
         return False
-    return await douyin_cookie_auth(str(account_file))
+    return await douyin_cookie_auth(str(account_file), cdp_url=cdp_url)
 
 
 async def login_kuaishou_account(account_name: str, headless: bool = True, cdp_url: str | None = None) -> dict:
@@ -286,8 +489,11 @@ async def check_xiaohongshu_account(account_name: str, cdp_url: str | None = Non
     return await xiaohongshu_cookie_auth(str(account_file), cdp_url=cdp_url)
 
 
-async def login_bilibili_account(account_name: str) -> dict:
+async def login_bilibili_account(account_name: str, cdp_url: str | None = None, target=None) -> dict:
     account_file = resolve_account_file("bilibili", account_name)
+    if cdp_url:
+        identity = await export_bilibili_cdp_account(cdp_url, account_file, target)
+        return {"success": True, "message": "Bilibili CDP account exported", "account_file": str(account_file), "identity": identity.to_dict()}
     if not has_interactive_terminal():
         return {
             "success": False,
@@ -308,12 +514,20 @@ async def login_bilibili_account(account_name: str) -> dict:
     }
 
 
-async def check_bilibili_account(account_name: str) -> bool:
+async def check_bilibili_account(account_name: str, cdp_url: str | None = None, target=None) -> bool:
     account_file = resolve_account_file("bilibili", account_name)
-    if not account_file.exists():
+    expected = None
+    if cdp_url:
+        expected = await export_bilibili_cdp_account(cdp_url, account_file, target)
+    elif not account_file.exists():
         return False
     result = run_biliup_command(["-u", str(account_file), "renew"])
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False
+    if expected is not None:
+        observed = read_bilibili_account_identity(account_file, target)
+        assert_same_publish_identity(expected, observed)
+    return True
 
 
 async def login_tencent_account(account_name: str, headless: bool = True) -> dict:
@@ -339,7 +553,7 @@ async def login_youtube_account(
 
 async def check_youtube_account(account_name: str, cdp_url: str | None = None) -> bool:
     account_file = resolve_account_file("youtube", account_name)
-    if not account_file.exists():
+    if not cdp_url and not account_file.exists():
         return False
     return await youtube_cookie_auth(str(account_file), cdp_url=cdp_url)
 
@@ -421,14 +635,17 @@ async def upload_youtube_video(request: YouTubeVideoUploadRequest) -> dict | Pat
         submit=request.submit,
         schedule=request.schedule,
         timezone=request.timezone,
+        browser_name=request.browser_name,
+        cdp_port=request.cdp_port,
+        target_account=request.target_account,
     )
     result = await app.main()
     return result if result is not None else account_file
 
 
-async def upload_video(request: DouyinVideoUploadRequest) -> Path:
+async def upload_video(request: DouyinVideoUploadRequest) -> dict:
     account_file = resolve_account_file("douyin", request.account_name)
-    is_ready = await douyin_setup(str(account_file), handle=False)
+    is_ready = await douyin_setup(str(account_file), handle=False, cdp_url=request.cdp_url)
     if not is_ready:
         raise RuntimeError(
             f"Douyin cookie is missing or expired: {account_file}. Run `sau douyin login --account {request.account_name}` first."
@@ -455,14 +672,16 @@ async def upload_video(request: DouyinVideoUploadRequest) -> Path:
         cdp_url=request.cdp_url,
         declaration=request.declaration,
         collection=request.collection,
+        browser_name=request.browser_name,
+        cdp_port=request.cdp_port,
+        target_account=request.target_account,
     )
-    await app.douyin_upload_video()
-    return account_file
+    return await app.douyin_upload_video()
 
 
 async def upload_note(request: DouyinNoteUploadRequest) -> Path:
     account_file = resolve_account_file("douyin", request.account_name)
-    is_ready = await douyin_setup(str(account_file), handle=False)
+    is_ready = await douyin_setup(str(account_file), handle=False, cdp_url=request.cdp_url)
     if not is_ready:
         raise RuntimeError(
             f"Douyin cookie is missing or expired: {account_file}. Run `sau douyin login --account {request.account_name}` first."
@@ -585,12 +804,36 @@ async def upload_xiaohongshu_note(request: XiaohongshuNoteUploadRequest) -> Path
     return account_file
 
 
-async def upload_bilibili_video(request: BilibiliVideoUploadRequest) -> Path:
+async def upload_bilibili_video(request: BilibiliVideoUploadRequest) -> dict:
     account_file = resolve_account_file("bilibili", request.account_name)
     if not account_file.exists():
         raise RuntimeError(
             f"Bilibili account file is missing: {account_file}. Run `sau bilibili login --account {request.account_name}` first."
         )
+
+    try:
+        credential_identity = read_bilibili_account_identity(account_file)
+    except RuntimeError:
+        if request.target_account or request.cdp_url:
+            raise
+        credential_identity = None
+    if request.target_account and credential_identity and not identity_matches(credential_identity, request.target_account):
+        raise RuntimeError("blocked publish identity: target account does not match Bilibili credentials")
+    focus_fallback_used = request.focus_fallback_used
+    if request.cdp_url:
+        live_identity = await get_bilibili_cdp_identity(request.cdp_url)
+        focus_fallback_used = focus_fallback_used or bool(
+            live_identity.extra.get("focus_fallback_used")
+        )
+        require_publish_identity(live_identity)
+        if credential_identity is None:
+            raise RuntimeError("Bilibili credential identity is unavailable")
+        assert_same_publish_identity(live_identity, credential_identity)
+        final_identity = await get_bilibili_cdp_identity(request.cdp_url)
+        focus_fallback_used = focus_fallback_used or bool(
+            final_identity.extra.get("focus_fallback_used")
+        )
+        assert_same_publish_identity(live_identity, final_identity)
 
     arguments = [
         "-u",
@@ -617,7 +860,24 @@ async def upload_bilibili_video(request: BilibiliVideoUploadRequest) -> Path:
         section_id = resolve_bilibili_section_id(account_file, season_id)
         arguments.extend(["--extra-fields", json.dumps({"season_id": season_id})])
     if isinstance(request.publish_date, datetime):
-        arguments.extend(["--dtime", str(int(request.publish_date.timestamp()))])
+        schedule = request.publish_date
+        if schedule.tzinfo is None:
+            schedule = schedule.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
+        else:
+            schedule = schedule.astimezone(ZoneInfo("Asia/Shanghai"))
+        arguments.extend(["--dtime", str(int(schedule.timestamp()))])
+    else:
+        schedule = None
+
+    try:
+        account_payload = json.loads(account_file.read_text(encoding="utf-8"))
+        has_cookie_data = isinstance(account_payload.get("cookie_info"), dict)
+    except (OSError, ValueError, json.JSONDecodeError):
+        has_cookie_data = False
+    if has_cookie_data:
+        existing_matches = read_bilibili_archive_matches(account_file, request.title, attempts=1)
+        if existing_matches:
+            raise RuntimeError("Bilibili exact title already exists; refusing duplicate submission")
 
     result = run_biliup_command(arguments)
     if result.returncode != 0:
@@ -629,7 +889,32 @@ async def upload_bilibili_video(request: BilibiliVideoUploadRequest) -> Path:
         aid = find_bilibili_archive_aid(account_file, request.title)
         cid = fetch_bilibili_archive_cid(account_file, aid)
         add_archive_to_season(account_file, aid, cid, request.title, section_id)
-    return account_file
+    matches = []
+    if has_cookie_data:
+        matches = read_bilibili_archive_matches(account_file, request.title)
+        if len(matches) != 1:
+            raise RuntimeError(f"Bilibili archive title matched {len(matches)} records; expected exactly one")
+    evidence = matches[0] if matches else {}
+    if schedule and evidence.get("dtime") is not None:
+        try:
+            observed_dtime = int(evidence["dtime"])
+        except (TypeError, ValueError):
+            observed_dtime = None
+        if observed_dtime is not None and observed_dtime != int(schedule.timestamp()):
+            raise RuntimeError("Bilibili archive schedule does not match requested time")
+    return {
+        "status": "success",
+        "platform": "bilibili",
+        "browser_name": request.browser_name,
+        "cdp_port": request.cdp_port,
+        "stable_id": credential_identity.stable_id if credential_identity else None,
+        "submitted": True,
+        "work_id": str(evidence.get("aid", "")),
+        "scheduled_at": schedule.isoformat() if schedule else None,
+        "cover_present": evidence.get("cover_present", bool(request.thumbnail_file and request.thumbnail_file.exists())),
+        "focus_fallback_used": focus_fallback_used,
+        "message": "scheduled upload verified" if schedule else "upload verified",
+    }
 
 
 async def upload_tencent_video(request: TencentVideoUploadRequest) -> Path:
@@ -695,7 +980,17 @@ def add_runtime_flags(parser: argparse.ArgumentParser) -> None:
     headless_group = parser.add_mutually_exclusive_group()
     headless_group.add_argument("--headed", dest="headless", action="store_false", help="Run with browser UI")
     headless_group.add_argument("--headless", dest="headless", action="store_true", help="Run in headless mode")
-    parser.add_argument(
+    runtime_selector_group = parser.add_mutually_exclusive_group()
+    runtime_selector_group.add_argument(
+        "--browser",
+        default=os.environ.get("SAU_BROWSER"),
+        help="Registered browser name or port; resolves to a healthy local CDP target",
+    )
+    runtime_selector_group.add_argument(
+        "--browsers",
+        help="Comma-separated registered browser names or ports",
+    )
+    runtime_selector_group.add_argument(
         "--cdp-url",
         default=os.environ.get("SAU_CDP_URL"),
         help="Connect to an existing Agent Chrome/Chromium over CDP, e.g. http://127.0.0.1:9223",
@@ -711,14 +1006,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     platform_parsers = parser.add_subparsers(dest="platform", required=True)
 
+    accounts_parser = platform_parsers.add_parser("accounts", help="Account operations")
+    accounts_actions = accounts_parser.add_subparsers(dest="action", required=True)
+    accounts_scan_parser = accounts_actions.add_parser("scan", help="Scan platform identities in browser pool")
+    accounts_scan_parser.add_argument("--browsers", required=True, help="Comma-separated registered browser names or ports")
+    accounts_scan_parser.add_argument(
+        "--platforms",
+        required=True,
+        help="Comma-separated platforms: douyin,youtube,bilibili",
+    )
+
+    batch_parser = platform_parsers.add_parser("batch", help="Run a sequential task manifest")
+    batch_parser.add_argument("--file", required=True, type=existing_file_path, help="JSON batch manifest")
+
     douyin_parser = platform_parsers.add_parser("douyin", help="Douyin operations")
     douyin_actions = douyin_parser.add_subparsers(dest="action", required=True)
 
-    for action_name in ("login", "check"):
+    for action_name in ("login", "check", "identity"):
         action_parser = douyin_actions.add_parser(action_name, help=f"Douyin {action_name}")
         action_parser.add_argument("--account", required=True, help="Douyin user-defined account_name")
-        if action_name == "login":
-            add_runtime_flags(action_parser)
+        if action_name == "identity":
+            action_parser.add_argument("--target-account", help="Exact stable ID, handle, or display name to verify")
+        add_runtime_flags(action_parser)
 
     upload_video_parser = douyin_actions.add_parser("upload-video", help="Upload one video to Douyin")
     upload_video_parser.add_argument("--account", required=True, help="Douyin user-defined account_name")
@@ -750,6 +1059,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional Douyin collection (合集) name to select during publishing",
     )
+    upload_video_parser.add_argument("--target-account", help="Exact stable ID, handle, or display name to route to")
+    upload_video_parser.add_argument("--task-id", help="Idempotency key for this upload task")
     add_runtime_flags(upload_video_parser)
 
     upload_note_parser = douyin_actions.add_parser("upload-note", help="Upload one note to Douyin")
@@ -823,9 +1134,12 @@ def build_parser() -> argparse.ArgumentParser:
     bilibili_parser = platform_parsers.add_parser("bilibili", help="Bilibili operations")
     bilibili_actions = bilibili_parser.add_subparsers(dest="action", required=True)
 
-    for action_name in ("login", "check"):
+    for action_name in ("login", "check", "identity"):
         action_parser = bilibili_actions.add_parser(action_name, help=f"Bilibili {action_name}")
         action_parser.add_argument("--account", required=True, help="Bilibili user-defined account_name")
+        if action_name == "identity":
+            action_parser.add_argument("--target-account", help="Exact stable ID, handle, or display name to verify")
+        add_runtime_flags(action_parser)
 
     bilibili_upload_video_parser = bilibili_actions.add_parser("upload-video", help="Upload one video to Bilibili")
     bilibili_upload_video_parser.add_argument("--account", required=True, help="Bilibili user-defined account_name")
@@ -842,6 +1156,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Enable Bilibili charging-exclusive video; cannot be edited after publication",
     )
     bilibili_upload_video_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
+    bilibili_upload_video_parser.add_argument("--target-account", help="Exact stable ID, handle, or display name to route to")
+    bilibili_upload_video_parser.add_argument("--task-id", help="Idempotency key for this upload task")
+    add_runtime_flags(bilibili_upload_video_parser)
 
     tencent_parser = platform_parsers.add_parser("tencent", help="Tencent/WeChat Channels operations")
     tencent_actions = tencent_parser.add_subparsers(dest="action", required=True)
@@ -870,9 +1187,11 @@ def build_parser() -> argparse.ArgumentParser:
     youtube_parser = platform_parsers.add_parser("youtube", help="YouTube operations")
     youtube_actions = youtube_parser.add_subparsers(dest="action", required=True)
 
-    for action_name in ("login", "check"):
+    for action_name in ("login", "check", "identity"):
         action_parser = youtube_actions.add_parser(action_name, help=f"YouTube {action_name}")
         action_parser.add_argument("--account", required=True, help="YouTube user-defined account_name")
+        if action_name == "identity":
+            action_parser.add_argument("--target-account", help="Exact stable ID, handle, or display name to verify")
         add_runtime_flags(action_parser)
 
     youtube_upload_video_parser = youtube_actions.add_parser("upload-video", help="Upload one video to YouTube")
@@ -897,11 +1216,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--timezone", default="Asia/Shanghai", type=timezone_value,
         help="IANA timezone for --schedule (default: Asia/Shanghai)",
     )
+    youtube_upload_video_parser.add_argument("--target-account", help="Exact stable ID, handle, or display name to route to")
+    youtube_upload_video_parser.add_argument("--task-id", help="Idempotency key for this upload task")
     add_runtime_flags(youtube_upload_video_parser)
     return parser
 
 
 async def dispatch(args: argparse.Namespace) -> int:
+    if args.platform == "batch":
+        return await dispatch_batch(args.file)
+    if args.platform == "accounts":
+        if args.action != "scan":
+            raise RuntimeError(f"Unsupported accounts action: {args.action}")
+        platforms = [item.strip().lower() for item in args.platforms.split(",") if item.strip()]
+        if not platforms or any(item not in {"douyin", "youtube", "bilibili"} for item in platforms):
+            raise ValueError("--platforms must contain only douyin,youtube,bilibili")
+        result = await scan_accounts(
+            [item.strip() for item in args.browsers.split(",") if item.strip()],
+            platforms,
+        )
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0 if result["items"] else 1
+
+    browser = getattr(args, "browser", None)
+    browsers = getattr(args, "browsers", None)
+    cdp_url = getattr(args, "cdp_url", None)
+    if sum(bool(value) for value in (browser, browsers, cdp_url)) > 1:
+        raise ValueError("--browser, --browsers and --cdp-url cannot be used together")
+    target = await _resolve_upload_target(args)
+    if target is not None:
+        args.cdp_url = target.cdp_url
+
     if args.platform == "douyin":
         if args.action == "login":
             result = await login_douyin_account(args.account, headless=args.headless, cdp_url=getattr(args, "cdp_url", None))
@@ -911,9 +1256,21 @@ async def dispatch(args: argparse.Namespace) -> int:
             return 0
 
         if args.action == "check":
-            is_valid = await check_douyin_account(args.account)
+            is_valid = await check_douyin_account(args.account, cdp_url=getattr(args, "cdp_url", None))
             print("valid" if is_valid else "invalid")
             return 0 if is_valid else 1
+
+        if args.action == "identity":
+            identity = await get_douyin_account_identity(
+                cdp_url=getattr(args, "cdp_url", None),
+                account_file=str(resolve_account_file("douyin", args.account)),
+                browser_name=target.name if target else None,
+                cdp_port=target.port if target else None,
+            )
+            if getattr(args, "target_account", None) and not identity_matches(identity, args.target_account):
+                raise RuntimeError("identity does not match --target-account")
+            print(json.dumps(identity.to_dict(), ensure_ascii=False, sort_keys=True))
+            return 0 if identity.logged_in and identity.stable_id else 1
 
         publish_strategy = DOUYIN_PUBLISH_STRATEGY_SCHEDULED if args.schedule else DOUYIN_PUBLISH_STRATEGY_IMMEDIATE
 
@@ -936,9 +1293,21 @@ async def dispatch(args: argparse.Namespace) -> int:
                 cdp_url=getattr(args, "cdp_url", None),
                 declaration=args.declaration,
                 collection=args.collection,
+                browser_name=target.name if target else None,
+                cdp_port=target.port if target else None,
+                target_account=getattr(args, "target_account", None),
             )
-            await upload_video(request)
-            print(f"Douyin video upload submitted: {request.video_file}")
+            result = await upload_video(request)
+            if not isinstance(result, dict):
+                result = {
+                    "status": "success",
+                    "platform": "douyin",
+                    "browser_name": request.browser_name,
+                    "cdp_port": request.cdp_port,
+                    "submitted": True,
+                }
+            args._last_result = result
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0
 
         if args.action == "upload-note":
@@ -1088,18 +1457,41 @@ async def dispatch(args: argparse.Namespace) -> int:
 
     if args.platform == "bilibili":
         if args.action == "login":
-            result = await login_bilibili_account(args.account)
+            result = await login_bilibili_account(
+                args.account, cdp_url=getattr(args, "cdp_url", None), target=target
+            )
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Bilibili login flow completed: {result['account_file']}")
             return 0
 
         if args.action == "check":
-            is_valid = await check_bilibili_account(args.account)
+            is_valid = await check_bilibili_account(
+                args.account, cdp_url=getattr(args, "cdp_url", None), target=target
+            )
             print("valid" if is_valid else "invalid")
             return 0 if is_valid else 1
 
+        if args.action == "identity":
+            account_file = resolve_account_file("bilibili", args.account)
+            identity = (
+                await get_bilibili_cdp_identity(args.cdp_url, target)
+                if getattr(args, "cdp_url", None)
+                else read_bilibili_account_identity(account_file, target)
+            )
+            if getattr(args, "target_account", None) and not identity_matches(identity, args.target_account):
+                raise RuntimeError("identity does not match --target-account")
+            print(json.dumps(identity.to_dict(), ensure_ascii=False, sort_keys=True))
+            return 0 if identity.logged_in and identity.stable_id else 1
+
         if args.action == "upload-video":
+            exported_identity = None
+            if getattr(args, "cdp_url", None):
+                account_file = resolve_account_file("bilibili", args.account)
+                exported_identity = await export_bilibili_cdp_account(args.cdp_url, account_file, target)
+                require_publish_identity(exported_identity)
+                if getattr(args, "target_account", None) and not identity_matches(exported_identity, args.target_account):
+                    raise RuntimeError("blocked publish identity: target account does not match Bilibili page")
             request = BilibiliVideoUploadRequest(
                 account_name=args.account,
                 video_file=args.file,
@@ -1111,9 +1503,18 @@ async def dispatch(args: argparse.Namespace) -> int:
                 thumbnail_file=args.thumbnail,
                 charging_pay=args.charging_pay,
                 collection=args.collection,
+                cdp_url=getattr(args, "cdp_url", None),
+                browser_name=target.name if target else None,
+                cdp_port=target.port if target else None,
+                target_account=getattr(args, "target_account", None),
+                focus_fallback_used=bool(
+                    exported_identity
+                    and exported_identity.extra.get("focus_fallback_used")
+                ),
             )
-            await upload_bilibili_video(request)
-            print(f"Bilibili video upload submitted: {request.video_file}")
+            result = await upload_bilibili_video(request)
+            args._last_result = result
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
             return 0
 
         raise RuntimeError(f"Unsupported Bilibili action: {args.action}")
@@ -1173,6 +1574,17 @@ async def dispatch(args: argparse.Namespace) -> int:
             print("valid" if is_valid else "invalid")
             return 0 if is_valid else 1
 
+        if args.action == "identity":
+            identity = await get_youtube_account_identity(
+                cdp_url=getattr(args, "cdp_url", None),
+                browser_name=target.name if target else None,
+                cdp_port=target.port if target else None,
+            )
+            if getattr(args, "target_account", None) and not identity_matches(identity, args.target_account):
+                raise RuntimeError("identity does not match --target-account")
+            print(json.dumps(identity.to_dict(), ensure_ascii=False, sort_keys=True))
+            return 0 if identity.logged_in and identity.stable_id else 1
+
         if args.action == "upload-video":
             request = YouTubeVideoUploadRequest(
                 account_name=args.account,
@@ -1189,12 +1601,16 @@ async def dispatch(args: argparse.Namespace) -> int:
                 submit=args.submit,
                 schedule=getattr(args, "schedule", None),
                 timezone=getattr(args, "timezone", "Asia/Shanghai"),
+                browser_name=target.name if target else None,
+                cdp_port=target.port if target else None,
+                target_account=getattr(args, "target_account", None),
             )
             result = await upload_youtube_video(request)
-            if request.schedule:
-                if not isinstance(result, dict):
-                    raise RuntimeError("YouTube scheduled upload finished without Studio readback")
+            if isinstance(result, dict):
+                args._last_result = result
                 print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+                if request.submit and result.get("status") != "success":
+                    return 1
             else:
                 action_label = "submitted" if request.submit else "prepared without submit"
                 print(f"YouTube video upload {action_label}: {request.video_file}")
@@ -1207,9 +1623,47 @@ async def dispatch(args: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    args = parser.parse_args(raw_argv)
+    args._raw_argv = raw_argv
+
+    async def run_dispatch() -> int:
+        async def dispatch_with_browser_locks() -> int:
+            with contextlib.ExitStack() as stack:
+                for port in _batch_ports(args):
+                    stack.enter_context(browser_task_lock(port))
+                return await dispatch(args)
+
+        task_id = getattr(args, "task_id", None)
+        if not task_id:
+            return await dispatch_with_browser_locks()
+        prior = begin_task(task_id, raw_argv)
+        if prior["state"] != "started":
+            print(json.dumps(prior["result"], ensure_ascii=False, sort_keys=True))
+            return 0 if prior["state"] == "skipped_duplicate" else 1
+        try:
+            exit_code = await dispatch_with_browser_locks()
+        except asyncio.TimeoutError:
+            finish_task(task_id, {"status": "error", "message": "task outcome is uncertain", "task_state": "uncertain"})
+            raise
+        except Exception as exc:
+            finish_task(task_id, {"status": "error", "message": _sanitized_identity_error(exc), "task_state": "failed"})
+            raise
+        if isinstance(getattr(args, "_last_result", None), dict):
+            finish_task(
+                task_id,
+                {
+                    **args._last_result,
+                    "exit_code": exit_code,
+                    "task_state": "complete" if exit_code == 0 else "failed",
+                },
+            )
+        else:
+            finish_task(task_id, {"status": "success" if exit_code == 0 else "error", "exit_code": exit_code, "task_state": "complete" if exit_code == 0 else "failed"})
+        return exit_code
+
     try:
-        return asyncio.run(dispatch(args))
+        return asyncio.run(run_dispatch())
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1

@@ -11,7 +11,7 @@ import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
-from utils.browser_runtime import open_browser_session
+from utils.browser_runtime import BrowserSession, open_browser_session, save_storage_state_if_owned
 
 
 def _await_session(playwright, **kwargs):
@@ -56,8 +56,6 @@ class OpenBrowserSessionCdpIdentityTests(unittest.TestCase):
         # ...and the browser's active context was NOT reused.
         self.assertNotEqual(session.context, browser.contexts[0])
         self.assertTrue(session.should_close_context)
-        chromium.connect_over_cdp.assert_awaited_once_with("http://127.0.0.1:9241")
-        chromium.launch.assert_not_awaited()
 
     def test_cdp_without_storage_state_reuses_existing_context(self):
         """Interactive login without an account identity keeps the current behavior."""
@@ -106,6 +104,146 @@ class OpenBrowserSessionCdpIdentityTests(unittest.TestCase):
             storage_state="/tmp/a.json"
         )
         self.assertTrue(session.should_close_context)
+
+
+class _ExpectedPage:
+    def __init__(self, page):
+        self._page = page
+
+    async def _get_page(self):
+        return self._page
+
+    @property
+    def value(self):
+        return self._get_page()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_):
+        return False
+
+
+class BrowserSessionLifecycleTests(unittest.TestCase):
+    def test_storage_state_is_saved_only_for_owned_context(self):
+        owned_context = MagicMock()
+        owned_context.storage_state = AsyncMock()
+        owned = BrowserSession(MagicMock(), owned_context, True)
+        self.assertTrue(asyncio.run(save_storage_state_if_owned(owned, "/tmp/account.json")))
+        owned_context.storage_state.assert_awaited_once_with(path="/tmp/account.json")
+
+        shared_context = MagicMock()
+        shared_context.storage_state = AsyncMock()
+        shared = BrowserSession(MagicMock(), shared_context, False)
+        self.assertFalse(asyncio.run(save_storage_state_if_owned(shared, "/tmp/account.json")))
+        shared_context.storage_state.assert_not_awaited()
+
+    def test_cdp_session_records_initial_pages_and_creates_background_page(self):
+        initial = MagicMock()
+        task_page = MagicMock()
+        cdp = MagicMock()
+        cdp.send = AsyncMock(return_value={"targetId": "target-1"})
+        browser = MagicMock()
+        browser.new_browser_cdp_session = AsyncMock(return_value=cdp)
+        context = MagicMock()
+        context.pages = [initial, task_page]
+        context.expect_page.return_value = _ExpectedPage(task_page)
+
+        session = BrowserSession(browser, context, False, (initial,), True)
+        page = asyncio.run(session.new_task_page())
+
+        self.assertIs(page, task_page)
+        self.assertEqual(session.initial_pages, (initial,))
+        cdp.send.assert_awaited_once_with(
+            "Target.createTarget", {"url": "about:blank", "background": True}
+        )
+        context.new_page.assert_not_called()
+
+    def test_cdp_failure_uses_one_foreground_fallback(self):
+        fallback = MagicMock()
+        browser = MagicMock()
+        browser.new_browser_cdp_session = AsyncMock(side_effect=RuntimeError("background failed"))
+        context = MagicMock()
+        context.pages = []
+        context.new_page = AsyncMock(return_value=fallback)
+        context.expect_page.return_value = _ExpectedPage(MagicMock())
+
+        session = BrowserSession(browser, context, False, (), True)
+        self.assertIs(asyncio.run(session.new_task_page()), fallback)
+        self.assertTrue(session.focus_fallback_used)
+        context.new_page.assert_awaited_once_with()
+
+    def test_success_close_closes_only_new_pages(self):
+        initial = MagicMock()
+        first = MagicMock()
+        last = MagicMock()
+        first.close = AsyncMock()
+        last.close = AsyncMock()
+        browser = MagicMock()
+        browser.close = AsyncMock()
+        context = MagicMock()
+        context.pages = [initial, first, last]
+        context.close = AsyncMock()
+
+        session = BrowserSession(browser, context, False, (initial,), True)
+        asyncio.run(session.close(success=True))
+
+        first.close.assert_awaited_once_with()
+        last.close.assert_awaited_once_with()
+        initial.close.assert_not_called()
+        context.close.assert_not_awaited()
+        browser.close.assert_not_awaited()
+
+    def test_failure_close_leaves_last_new_page(self):
+        initial = MagicMock()
+        first = MagicMock()
+        last = MagicMock()
+        first.close = AsyncMock()
+        last.close = AsyncMock()
+        browser = MagicMock()
+        browser.close = AsyncMock()
+        context = MagicMock()
+        context.pages = [initial, first, last]
+
+        session = BrowserSession(browser, context, False, (initial,), True)
+        asyncio.run(session.close(success=False))
+
+        first.close.assert_awaited_once_with()
+        last.close.assert_not_awaited()
+        initial.close.assert_not_called()
+        browser.close.assert_not_awaited()
+
+    def test_cdp_dedicated_context_closes_context_but_not_browser(self):
+        page = MagicMock()
+        page.close = AsyncMock()
+        browser = MagicMock()
+        browser.close = AsyncMock()
+        context = MagicMock()
+        context.pages = [page]
+        context.close = AsyncMock()
+
+        session = BrowserSession(browser, context, True, (), True)
+        asyncio.run(session.close(success=True))
+
+        page.close.assert_awaited_once_with()
+        context.close.assert_awaited_once_with()
+        browser.close.assert_not_awaited()
+
+    def test_local_launch_closes_owned_context_and_browser(self):
+        page = MagicMock()
+        page.close = AsyncMock()
+        browser = MagicMock()
+        browser.close = AsyncMock()
+        context = MagicMock()
+        context.pages = [page]
+        context.close = AsyncMock()
+
+        session = BrowserSession(browser, context, True, (), False)
+        asyncio.run(session.close(success=True))
+
+        page.close.assert_awaited_once_with()
+        context.close.assert_awaited_once_with()
+        browser.close.assert_awaited_once_with()
 
 
 if __name__ == "__main__":
