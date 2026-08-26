@@ -194,7 +194,7 @@ class PaidVideoUiTests(PaidVideoParserTests):
         app._paid_agreement = AsyncMock()
         root = SimpleNamespace()
         page = SimpleNamespace(wait_for_timeout=AsyncMock())
-        expected = app.paid_video.to_snapshot()
+        expected = app.paid_video.to_ui_snapshot()
         app._open_paid_video_panel = AsyncMock(return_value=root)
         app._paid_switch = AsyncMock()
         app._paid_radio = AsyncMock()
@@ -213,7 +213,7 @@ class PaidVideoUiTests(PaidVideoParserTests):
         app._paid_agreement = AsyncMock()
         root = SimpleNamespace()
         page = SimpleNamespace(wait_for_timeout=AsyncMock())
-        expected = app.paid_video.to_snapshot()
+        expected = app.paid_video.to_ui_snapshot()
         app._open_paid_video_panel = AsyncMock(return_value=root)
         app._paid_switch = AsyncMock()
         app._paid_radio = AsyncMock()
@@ -231,10 +231,40 @@ class PaidVideoUiTests(PaidVideoParserTests):
             self.valid_paid(enabled=False, agreementConfirmed=False), video_duration_sec=48.5
         )
         app._open_paid_video_panel = AsyncMock()
+        app._paid_entry = AsyncMock(
+            return_value=(SimpleNamespace(), SimpleNamespace(is_checked=AsyncMock(return_value=False)))
+        )
         result = asyncio.run(app.set_paid_video_settings(SimpleNamespace()))
         app._open_paid_video_panel.assert_not_awaited()
         self.assertTrue(result["verified"])
-        self.assertIsNone(result["observed"])
+        self.assertEqual(result["observed"], {"enabled": False})
+
+    def test_disabled_config_blocks_when_page_paid_switch_is_on(self):
+        app = self._app()
+        app.paid_video = DouyinPaidVideoSettings.from_dict(
+            self.valid_paid(enabled=False, agreementConfirmed=False), video_duration_sec=48.5
+        )
+        app._paid_entry = AsyncMock(
+            return_value=(SimpleNamespace(), SimpleNamespace(is_checked=AsyncMock(return_value=True)))
+        )
+        with self.assertRaisesRegex(RuntimeError, "request disables it"):
+            asyncio.run(app.set_paid_video_settings(SimpleNamespace()))
+
+    def test_agreement_readback_uses_checkmark_presence(self):
+        app = self._app()
+        checkmark = SimpleNamespace(count=AsyncMock(side_effect=[0, 1]))
+        icon = SimpleNamespace(locator=MagicMock(return_value=checkmark))
+        app._paid_agreement_control = AsyncMock(return_value=icon)
+        self.assertFalse(asyncio.run(app._read_paid_agreement(SimpleNamespace())))
+        self.assertTrue(asyncio.run(app._read_paid_agreement(SimpleNamespace())))
+
+    def test_agreement_clicks_icon_and_verifies_the_new_state(self):
+        app = self._app()
+        icon = SimpleNamespace(click=AsyncMock())
+        app._paid_agreement_control = AsyncMock(return_value=icon)
+        app._read_paid_agreement = AsyncMock(side_effect=[False, True])
+        asyncio.run(app._paid_agreement(SimpleNamespace(), True))
+        icon.click.assert_awaited_once()
 
     def test_no_submit_returns_prepared_without_finding_publish_button(self):
         app = self._app(submit=False, cdp_url="http://127.0.0.1:9225")

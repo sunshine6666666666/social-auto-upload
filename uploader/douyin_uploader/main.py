@@ -1063,14 +1063,7 @@ class DouYinVideo(DouYinBaseUploader):
             if await control.count():
                 return control
 
-        if name == "付费视频":
-            control = root.locator('input[role="switch"]').first
-            if await control.count():
-                return control
-            alias = "付费或会员视频"
-        else:
-            alias = name
-        label = root.get_by_text(alias, exact=True).first
+        label = root.get_by_text(name, exact=True).first
         if not await label.count():
             raise RuntimeError(f"blocked Douyin paid video: missing switch {name}")
         section = label.locator("xpath=ancestor::*[.//input[@role='switch']][1]")
@@ -1120,7 +1113,7 @@ class DouYinVideo(DouYinBaseUploader):
             raise RuntimeError(f"blocked Douyin paid video: missing choice {value}")
         await control.click(force=True)
 
-    async def _paid_agreement(self, root, checked: bool) -> None:
+    async def _paid_agreement_control(self, root):
         label = root.get_by_text("协议确认", exact=True).first
         if not await label.count():
             raise RuntimeError("blocked Douyin paid video: missing agreement checkbox")
@@ -1128,11 +1121,22 @@ class DouYinVideo(DouYinBaseUploader):
         icon = row.locator("div[class^='checkIcon']").first
         if not await icon.count():
             raise RuntimeError("blocked Douyin paid video: missing agreement checkbox")
-        current = await icon.locator("svg").count() > 0
+        return icon
+
+    async def _read_paid_agreement(self, root) -> bool:
+        icon = await self._paid_agreement_control(root)
+        return await icon.locator("svg").count() > 0
+
+    async def _paid_agreement(self, root, checked: bool) -> None:
+        icon = await self._paid_agreement_control(root)
+        current = await self._read_paid_agreement(root)
         if current != checked:
             await icon.click()
+            await asyncio.sleep(0.3)
+            if await self._read_paid_agreement(root) != checked:
+                raise RuntimeError("blocked Douyin paid video: agreement checkbox did not change")
 
-    async def _open_paid_video_panel(self, page: Page):
+    async def _paid_entry(self, page: Page):
         entry = page.get_by_text("付费或会员视频", exact=True).first
         if not await entry.count():
             raise RuntimeError("blocked Douyin paid video: missing paid-video entry")
@@ -1140,6 +1144,10 @@ class DouYinVideo(DouYinBaseUploader):
         switch = section.locator('input[role="switch"]').first
         if not await switch.count():
             raise RuntimeError("blocked Douyin paid video: missing paid-video switch")
+        return section, switch
+
+    async def _open_paid_video_panel(self, page: Page):
+        section, switch = await self._paid_entry(page)
         if not await switch.is_checked():
             await switch.click(force=True)
             await page.wait_for_timeout(300)
@@ -1214,9 +1222,16 @@ class DouYinVideo(DouYinBaseUploader):
             return None
         requested = self.paid_video.to_snapshot()
         if not self.paid_video.enabled:
+            _, switch = await self._paid_entry(page)
+            if await switch.is_checked():
+                raise RuntimeError("blocked Douyin paid video: paid-video entry is enabled but request disables it")
             self._paid_video_result = {
                 "requested": requested,
-                "observed": None,
+                "observed": {"enabled": False},
+                "validated_only": {
+                    "subtitleModeText": self.paid_video.subtitle_mode_text,
+                    "collectionId": self.paid_video.collection_id,
+                },
                 "verified": True,
             }
             return self._paid_video_result
@@ -1224,7 +1239,6 @@ class DouYinVideo(DouYinBaseUploader):
         settings = self.paid_video
         root = await self._open_paid_video_panel(page)
         try:
-            await self._paid_switch(root, "付费视频", True)
             await self._paid_radio(root, settings.sale_mode_text)
             await self._paid_radio(root, settings.price_mode_text)
             await self._paid_textbox(root, "价格", f"{settings.price_yuan:.2f}")
@@ -1245,7 +1259,7 @@ class DouYinVideo(DouYinBaseUploader):
         first = await self.read_paid_video_settings(root)
         await page.wait_for_timeout(1000)
         second = await self.read_paid_video_settings(root)
-        expected = requested.copy()
+        expected = settings.to_ui_snapshot()
         if expected["coverAssetRef"]:
             expected["coverAssetRef"] = Path(expected["coverAssetRef"]).name
         if first != expected or second != expected or first != second:
@@ -1254,6 +1268,10 @@ class DouYinVideo(DouYinBaseUploader):
         self._paid_video_result = {
             "requested": requested,
             "observed": second,
+            "validated_only": {
+                "subtitleModeText": settings.subtitle_mode_text,
+                "collectionId": settings.collection_id,
+            },
             "verified": True,
         }
         return self._paid_video_result
@@ -1270,15 +1288,6 @@ class DouYinVideo(DouYinBaseUploader):
     async def _read_paid_textbox(self, root, label: str) -> str:
         control = await self._paid_textbox_control(root, label)
         return (await control.input_value()).strip()
-    async def _read_paid_agreement(self, root) -> bool:
-        label = root.get_by_text("协议确认", exact=True).first
-        if not await label.count():
-            raise RuntimeError("blocked Douyin paid video: missing agreement checkbox")
-        icon = label.locator("xpath=..").locator("div[class^='checkIcon']").first
-        if not await icon.count():
-            raise RuntimeError("blocked Douyin paid video: missing agreement checkbox")
-        return await icon.locator("svg").count() > 0
-
     async def _read_paid_trial(self, root) -> tuple[bool, int, int]:
         choice = await self._read_paid_choice(root, {"有试看", "无试看"}, "trialEnabled")
         if choice == "无试看":
@@ -1337,8 +1346,11 @@ class DouYinVideo(DouYinBaseUploader):
                     )
                     cover_asset_ref = cover_files or None
             trial_enabled, trial_start_sec, trial_end_sec = await self._read_paid_trial(root)
+            entry_switch = root.locator('input[role="switch"]').first
+            if not await entry_switch.count():
+                raise RuntimeError("blocked Douyin paid video: missing paid-video switch")
             return {
-                "enabled": await self._read_paid_switch(root, "付费视频"),
+                "enabled": bool(await entry_switch.is_checked()),
                 "saleModeText": await self._read_paid_choice(
                     root, {"单点售卖", "组合售卖"}, "saleModeText"
                 ),
@@ -1353,9 +1365,7 @@ class DouYinVideo(DouYinBaseUploader):
                 "trialStartSec": trial_start_sec,
                 "trialEndSec": trial_end_sec,
                 "marketingManaged": await self._read_paid_switch(root, "营销托管"),
-                "subtitleModeText": self.paid_video.subtitle_mode_text if self.paid_video else "",
                 "agreementConfirmed": await self._read_paid_agreement(root),
-                "collectionId": None,
             }
         except (KeyError, ValueError, TypeError) as exc:
             raise RuntimeError(f"blocked Douyin paid video: invalid readback: {exc}") from exc

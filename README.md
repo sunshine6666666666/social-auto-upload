@@ -321,9 +321,10 @@ sau douyin upload-video \
 
 - `platformAccountId` 会自动成为目标账号；若同时传 `--target-account`，两者必须完全一致。账号在上传前和提交前各核验一次，结果只报告是否匹配，不输出完整 ID。
 - 金额为 `1–1000` 元、最多两位小数；商品标题最多 28 个 Unicode 字符；试看窗口至少 10 秒且不超过视频总时长的一半。
-- 售卖方式只支持 `单点售卖`、`组合售卖`；价格模式只支持 `付费视频`、`付费视频（会员免费看）`、`会员视频`；字幕模式第一版只支持 `使用成片内已有双语字幕`。
+- 售卖方式只支持 `单点售卖`、`组合售卖`；价格模式只支持 `付费视频`、`付费视频（会员免费看）`、`会员视频`；`priceYuan` 兼容 Peach 输出的 JSON 数字和十进制字符串。
+- `subtitleModeText` 第一版只接受 `使用成片内已有双语字幕`。抖音发布页没有对应字幕控件，因此该字段只做输入校验并在结果的 `validated_only` 中回显，不伪装成 UI 回读值；`collectionId` 同理必须为 `null`。
 - `coverModeText` 为 `更改封面` 时，`coverAssetRef` 必须是存在的本地图片；`collectionId` 必须为 `null`，付费视频不能同时使用 `--collection`。
-- `enabled=false` 只校验配置，不操作付费 UI；开启付费时必须确认协议。付费设置后会连续回读两次，任一次不一致都 fail closed。
+- `enabled=false` 不展开或修改付费控件，但会确认页面总开关确实关闭；若页面残留为开启状态则阻止发布。开启付费时必须确认协议，设置后会连续回读两次，任一次不一致都 fail closed。
 - `--no-submit` 与 `--schedule` 互斥；成功返回 `status=prepared`、`submitted=false`。不传付费配置时，原有免费上传行为不变。
 
 
