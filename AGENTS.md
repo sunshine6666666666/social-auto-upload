@@ -1,5 +1,11 @@
 # Repository Guidelines
 
+## Hermes Profile Collaboration Repositories
+
+- English workflow latest read-only source: `/Users/yelin/Developer/linye-english-news-workflow`. Never modify, commit, or push in this directory. Do not use the old `/Users/yelin/Developer/agent-tools/express` directory as evidence.
+- Social Auto Upload: `/Users/yelin/Developer/agent-tools/social-auto-upload`.
+- Browser Harness: `/Users/yelin/Developer/agent-tools/browser-harness`.
+
 ## Project Structure & Module Organization
 
 The Python application lives primarily at the repository root: `sau_cli.py` provides the `sau` command, `sau_backend.py` hosts the Flask API, and `uploader/`, `utils/`, and `myUtils/` contain platform automation and shared helpers. The Vue 3 admin UI is in `sau_frontend/`. Put Python tests in `tests/`, matching the target area (for example, `tests/test_sau_bilibili_cli.py`). SQLite setup code and the local database belong in `db/`; runtime media, cookies, and logs belong in their respective ignored directories.
