@@ -21,7 +21,7 @@ class PaidVideoParserTests(unittest.TestCase):
             "enabled": True,
             "saleModeText": "单点售卖",
             "priceModeText": "付费视频",
-            "priceYuan": "1.00",
+            "priceYuan": 1,
             "productTitle": "SAU付费功能测试",
             "coverModeText": "当前封面",
             "coverAssetRef": None,
@@ -52,11 +52,20 @@ class PaidVideoParserTests(unittest.TestCase):
         self.assertEqual(settings.product_title, "标题")
         self.assertEqual(settings.to_snapshot()["priceYuan"], "1.00")
 
+    def test_accepts_peach_json_number_and_legacy_decimal_string(self):
+        for price in (3, 1.25, "1.25"):
+            with self.subTest(price=price):
+                _, settings = parse_peach_douyin_target(
+                    self.valid_target(priceYuan=price), video_duration_sec=48.5
+                )
+                self.assertEqual(settings.price_yuan, Decimal(str(price)))
+
     def test_strict_money_and_enum_boundaries(self):
         for overrides in (
             {"priceYuan": "0.99"},
             {"priceYuan": "1000.01"},
             {"priceYuan": "1.001"},
+            {"priceYuan": True},
             {"priceModeText": "付费直播"},
             {"subtitleModeText": "使用AI自动生成双语字幕"},
             {"productTitle": "x" * 29},

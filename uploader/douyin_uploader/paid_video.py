@@ -48,7 +48,9 @@ def _require_one_of(value, field_name: str, allowed: set[str]) -> str:
 
 
 def _parse_price_yuan(raw) -> Decimal:
-    text = _require_str(raw, "priceYuan")
+    if isinstance(raw, bool) or not isinstance(raw, (str, int, float, Decimal)):
+        raise ValueError("priceYuan must be a decimal number")
+    text = str(raw).strip()
     if not re.fullmatch(r"\d+(?:\.\d+)?", text):
         raise ValueError("priceYuan must be a non-negative decimal number")
     if "." in text:
@@ -197,6 +199,12 @@ class DouyinPaidVideoSettings:
             "agreementConfirmed": self.agreement_confirmed,
             "collectionId": self.collection_id,
         }
+
+    def to_ui_snapshot(self) -> dict:
+        snapshot = self.to_snapshot()
+        snapshot.pop("subtitleModeText")
+        snapshot.pop("collectionId")
+        return snapshot
 
 
 
