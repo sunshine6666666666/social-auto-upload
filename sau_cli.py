@@ -66,6 +66,7 @@ from uploader.xiaohongshu_uploader.main import (
     cookie_auth as xiaohongshu_cookie_auth,
     xiaohongshu_setup,
 )
+from uploader.douyin_uploader.paid_video import DouyinPaidVideoSettings, parse_peach_douyin_target
 from uploader.youtube_uploader.main import (
     YouTubeVideo,
     cookie_auth as youtube_cookie_auth,
@@ -106,6 +107,9 @@ class DouyinVideoUploadRequest:
     browser_name: str | None = None
     cdp_port: int | None = None
     target_account: str | None = None
+    paid_target_config: Path | None = None
+    paid_video: DouyinPaidVideoSettings | None = None
+    submit: bool = True
 
 
 @dataclass(slots=True)
@@ -121,7 +125,6 @@ class DouyinNoteUploadRequest:
     headless: bool = True
     cdp_url: str | None = None
     bgm: str = ""
-
 
 @dataclass(slots=True)
 class KuaishouVideoUploadRequest:
@@ -675,9 +678,10 @@ async def upload_video(request: DouyinVideoUploadRequest) -> dict:
         browser_name=request.browser_name,
         cdp_port=request.cdp_port,
         target_account=request.target_account,
+        paid_video=request.paid_video,
+        submit=request.submit,
     )
     return await app.douyin_upload_video()
-
 
 async def upload_note(request: DouyinNoteUploadRequest) -> Path:
     account_file = resolve_account_file("douyin", request.account_name)
@@ -1035,7 +1039,19 @@ def build_parser() -> argparse.ArgumentParser:
     upload_video_parser.add_argument("--title", required=True, help="Video title")
     upload_video_parser.add_argument("--desc", default="", help="Optional video description")
     upload_video_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
-    upload_video_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
+    douyin_submission_group = upload_video_parser.add_mutually_exclusive_group()
+    douyin_submission_group.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
+    douyin_submission_group.add_argument(
+        "--no-submit",
+        dest="submit",
+        action="store_false",
+        help="Fill paid-video controls and metadata then stop before final publish",
+    )
+    upload_video_parser.add_argument(
+        "--paid-target-config",
+        type=existing_file_path,
+        help="Peach publish target config JSON for paid-video settings",
+    )
     upload_video_parser.add_argument("--thumbnail", type=existing_file_path, help="Optional 3:4 portrait thumbnail path")
     upload_video_parser.add_argument("--thumbnail-landscape", type=existing_file_path, help="Optional 4:3 landscape thumbnail path")
     upload_video_parser.add_argument("--thumbnail-portrait", type=existing_file_path, help="Optional 3:4 portrait thumbnail path")
@@ -1238,16 +1254,91 @@ async def dispatch(args: argparse.Namespace) -> int:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if result["items"] else 1
 
-    browser = getattr(args, "browser", None)
-    browsers = getattr(args, "browsers", None)
-    cdp_url = getattr(args, "cdp_url", None)
-    if sum(bool(value) for value in (browser, browsers, cdp_url)) > 1:
-        raise ValueError("--browser, --browsers and --cdp-url cannot be used together")
-    target = await _resolve_upload_target(args)
-    if target is not None:
-        args.cdp_url = target.cdp_url
+    target = None
+    if not (args.platform == "douyin" and args.action == "upload-video"):
+        target = await _resolve_upload_target(args)
+        if target is not None:
+            args.cdp_url = target.cdp_url
 
     if args.platform == "douyin":
+        publish_strategy = DOUYIN_PUBLISH_STRATEGY_SCHEDULED if args.schedule else DOUYIN_PUBLISH_STRATEGY_IMMEDIATE
+
+        if args.action == "upload-video":
+            paid_target_config = getattr(args, "paid_target_config", None)
+            paid_video: DouyinPaidVideoSettings | None = None
+            if paid_target_config is not None:
+                try:
+                    raw_target = json.loads(paid_target_config.read_text(encoding="utf-8"))
+                    paid_account_id, paid_video = parse_peach_douyin_target(
+                        raw_target,
+                        video_duration_sec=probe_video_duration_seconds(args.file),
+                        base_dir=paid_target_config.parent,
+                    )
+                except (OSError, json.JSONDecodeError, ValueError) as exc:
+                    raise ValueError(f"invalid --paid-target-config: {exc}") from exc
+
+                requested_account = getattr(args, "target_account", None)
+                if requested_account and paid_account_id != requested_account:
+                    raise ValueError(
+                        "paid target account does not match --target-account; keep one account source"
+                    )
+                args.target_account = paid_account_id
+                if getattr(args, "collection", None):
+                    raise ValueError("douyin paid video does not support --collection")
+
+            args.paid_video = paid_video
+            args.paid_target_config = paid_target_config
+            target = await _resolve_upload_target(args)
+            if target is not None:
+                args.cdp_url = target.cdp_url
+
+            request = DouyinVideoUploadRequest(
+                account_name=args.account,
+                video_file=args.file,
+                title=args.title,
+                description=args.desc,
+                tags=parse_tags(args.tags),
+                publish_date=args.schedule or 0,
+                thumbnail_file=args.thumbnail,
+                thumbnail_landscape_file=args.thumbnail_landscape,
+                thumbnail_portrait_file=args.thumbnail_portrait,
+                product_link=args.product_link,
+                product_title=args.product_title,
+                publish_strategy=publish_strategy,
+                debug=args.debug,
+                headless=args.headless,
+                cdp_url=getattr(args, "cdp_url", None),
+                declaration=args.declaration,
+                collection=args.collection,
+                browser_name=target.name if target else None,
+                cdp_port=target.port if target else None,
+                target_account=getattr(args, "target_account", None),
+                paid_target_config=getattr(args, "paid_target_config", None),
+                paid_video=args.paid_video,
+                submit=getattr(args, "submit", True),
+            )
+            result = await upload_video(request)
+            if not isinstance(result, dict):
+                result = {
+                    "status": "prepared" if not request.submit else "success",
+                    "platform": "douyin",
+                    "browser_name": request.browser_name,
+                    "cdp_port": request.cdp_port,
+                    "submitted": request.submit,
+                    "paid_video": (
+                        {
+                            "requested": request.paid_video.to_snapshot(),
+                            "observed": None,
+                            "verified": False,
+                        }
+                        if request.paid_video
+                        else None
+                    ),
+                }
+            args._last_result = result
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0
+
         if args.action == "login":
             result = await login_douyin_account(args.account, headless=args.headless, cdp_url=getattr(args, "cdp_url", None))
             if not result["success"]:
@@ -1271,44 +1362,6 @@ async def dispatch(args: argparse.Namespace) -> int:
                 raise RuntimeError("identity does not match --target-account")
             print(json.dumps(identity.to_dict(), ensure_ascii=False, sort_keys=True))
             return 0 if identity.logged_in and identity.stable_id else 1
-
-        publish_strategy = DOUYIN_PUBLISH_STRATEGY_SCHEDULED if args.schedule else DOUYIN_PUBLISH_STRATEGY_IMMEDIATE
-
-        if args.action == "upload-video":
-            request = DouyinVideoUploadRequest(
-                account_name=args.account,
-                video_file=args.file,
-                title=args.title,
-                description=args.desc,
-                tags=parse_tags(args.tags),
-                publish_date=args.schedule or 0,
-                thumbnail_file=args.thumbnail,
-                thumbnail_landscape_file=args.thumbnail_landscape,
-                thumbnail_portrait_file=args.thumbnail_portrait,
-                product_link=args.product_link,
-                product_title=args.product_title,
-                publish_strategy=publish_strategy,
-                debug=args.debug,
-                headless=args.headless,
-                cdp_url=getattr(args, "cdp_url", None),
-                declaration=args.declaration,
-                collection=args.collection,
-                browser_name=target.name if target else None,
-                cdp_port=target.port if target else None,
-                target_account=getattr(args, "target_account", None),
-            )
-            result = await upload_video(request)
-            if not isinstance(result, dict):
-                result = {
-                    "status": "success",
-                    "platform": "douyin",
-                    "browser_name": request.browser_name,
-                    "cdp_port": request.cdp_port,
-                    "submitted": True,
-                }
-            args._last_result = result
-            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-            return 0
 
         if args.action == "upload-note":
             # 如果指定了 --notef，读取文件内容作为 note

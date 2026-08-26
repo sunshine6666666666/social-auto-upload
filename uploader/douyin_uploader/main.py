@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+from decimal import Decimal
 from datetime import datetime
 
 import asyncio
@@ -27,6 +28,7 @@ from utils.browser_runtime import (
     set_local_file_input_via_cdp,
 )
 from utils.account_identity import AccountIdentity, assert_same_publish_identity, identity_matches, require_publish_identity
+from uploader.douyin_uploader.paid_video import DouyinPaidVideoSettings
 
 DOUYIN_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 DOUYIN_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
@@ -923,6 +925,8 @@ class DouYinVideo(DouYinBaseUploader):
         browser_name: str | None = None,
         cdp_port: int | None = None,
         target_account: str | None = None,
+        paid_video: DouyinPaidVideoSettings | None = None,
+        submit: bool = True,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -945,11 +949,16 @@ class DouYinVideo(DouYinBaseUploader):
         self.desc = desc or ""
         self.declaration = declaration
         self.collection = collection
+        self.paid_video = paid_video
+        self.submit = submit
+        self._paid_video_result = None
 
     async def validate_upload_args(self):
         await self.validate_base_args()
         if not self.title or not str(self.title).strip():
             raise ValueError("视频模式下，title 是必须的")
+        if self.paid_video and self.paid_video.enabled and self.collection:
+            raise ValueError("Douyin paid video does not support collection")
 
         self.file_path = str(self.validate_video_file(self.file_path))
         if self.thumbnail_landscape_path:
@@ -1048,6 +1057,309 @@ class DouYinVideo(DouYinBaseUploader):
         douyin_logger.info(_msg("🥳", "视频封面设置完成"))
         await cover_locator.wait_for(state="detached", timeout=20000)
 
+    async def _paid_switch_control(self, root, name: str):
+        for role in ("switch", "checkbox"):
+            control = root.get_by_role(role, name=name, exact=True).first
+            if await control.count():
+                return control
+
+        if name == "付费视频":
+            control = root.locator('input[role="switch"]').first
+            if await control.count():
+                return control
+            alias = "付费或会员视频"
+        else:
+            alias = name
+        label = root.get_by_text(alias, exact=True).first
+        if not await label.count():
+            raise RuntimeError(f"blocked Douyin paid video: missing switch {name}")
+        section = label.locator("xpath=ancestor::*[.//input[@role='switch']][1]")
+        control = section.locator('input[role="switch"]').first
+        if not await control.count():
+            raise RuntimeError(f"blocked Douyin paid video: missing switch {name}")
+        return control
+
+    async def _paid_switch(self, root, name: str, checked: bool) -> None:
+        control = await self._paid_switch_control(root, name)
+        try:
+            current = await control.is_checked()
+        except Exception:
+            aria_checked = await control.get_attribute("aria-checked")
+            if aria_checked is None:
+                raise RuntimeError(f"blocked Douyin paid video: cannot read switch {name}")
+            current = aria_checked == "true"
+        if current != checked:
+            await control.click(force=True)
+
+    async def _paid_textbox_control(self, root, label: str):
+        aliases = {
+            "价格": "请输入视频售价",
+            "商品标题": "请输入付费场景下的视频标题",
+            "试看时长": "请配置试看时长",
+        }
+        for name in (label, aliases.get(label, label)):
+            control = root.get_by_role("textbox", name=name, exact=True).first
+            if await control.count():
+                return control
+        raise RuntimeError(f"blocked Douyin paid video: missing textbox {label}")
+
+    async def _paid_textbox(self, root, label: str, value: str) -> None:
+        control = await self._paid_textbox_control(root, label)
+        await control.fill(value)
+        actual = await control.input_value()
+        if actual.strip() != value:
+            raise RuntimeError(f"blocked Douyin paid video: {label} readback mismatch")
+    async def _paid_radio(self, root, value: str) -> None:
+        aliases = {
+            "当前封面": "使用原视频封面",
+            "更改封面": "上传新封面",
+        }
+        actual_value = aliases.get(value, value)
+        control = root.get_by_role("radio", name=actual_value, exact=True).first
+        if not await control.count():
+            raise RuntimeError(f"blocked Douyin paid video: missing choice {value}")
+        await control.click(force=True)
+
+    async def _paid_agreement(self, root, checked: bool) -> None:
+        label = root.get_by_text("协议确认", exact=True).first
+        if not await label.count():
+            raise RuntimeError("blocked Douyin paid video: missing agreement checkbox")
+        row = label.locator("xpath=..")
+        icon = row.locator("div[class^='checkIcon']").first
+        if not await icon.count():
+            raise RuntimeError("blocked Douyin paid video: missing agreement checkbox")
+        current = await icon.locator("svg").count() > 0
+        if current != checked:
+            await icon.click()
+
+    async def _open_paid_video_panel(self, page: Page):
+        entry = page.get_by_text("付费或会员视频", exact=True).first
+        if not await entry.count():
+            raise RuntimeError("blocked Douyin paid video: missing paid-video entry")
+        section = entry.locator("xpath=ancestor::*[.//input[@role='switch']][1]")
+        switch = section.locator('input[role="switch"]').first
+        if not await switch.count():
+            raise RuntimeError("blocked Douyin paid video: missing paid-video switch")
+        if not await switch.is_checked():
+            await switch.click(force=True)
+            await page.wait_for_timeout(300)
+            for _ in range(3):
+                confirmations = page.get_by_role("button", name="确定", exact=True)
+                clicked = False
+                for index in range(await confirmations.count() - 1, -1, -1):
+                    confirm = confirmations.nth(index)
+                    if await confirm.is_visible():
+                        await confirm.click(force=True)
+                        clicked = True
+                        await page.wait_for_timeout(300)
+                        break
+                if not clicked:
+                    break
+        await page.wait_for_timeout(300)
+        try:
+            await section.get_by_role("radio", name="单点售卖", exact=True).first.wait_for(
+                state="visible", timeout=5000
+            )
+        except Exception as exc:
+            raise RuntimeError("blocked Douyin paid video: paid controls did not open") from exc
+        return section
+
+    async def _set_paid_trial_range(self, page: Page, root, start_sec: int, end_sec: int) -> None:
+        await self._paid_radio(root, "有试看")
+        editor = root.get_by_role("button", name="编辑", exact=True).first
+        if not await editor.count():
+            raise RuntimeError("blocked Douyin paid video: missing trial editor")
+        await editor.click()
+        await page.wait_for_timeout(500)
+        modal = page.locator('[role="modal"]').filter(has_text="付费配置").first
+        await modal.wait_for(state="visible", timeout=10000)
+        sliders = modal.locator(".semi-slider")
+        if not await sliders.count():
+            raise RuntimeError("blocked Douyin paid video: missing trial slider")
+        slider = sliders.nth(await sliders.count() - 1)
+        maximum = int((await slider.locator(".semi-slider-boundary-max").text_content() or "").strip())
+        if maximum <= 0 or end_sec > maximum:
+            raise RuntimeError("blocked Douyin paid video: invalid trial slider range")
+        slider_box = await slider.bounding_box()
+        handles = slider.locator(".semi-slider-handle")
+        if not slider_box or await handles.count() < 2:
+            raise RuntimeError("blocked Douyin paid video: missing trial slider handles")
+        for index, seconds in enumerate((start_sec, end_sec)):
+            handle = handles.nth(index)
+            handle_box = await handle.bounding_box()
+            if not handle_box:
+                raise RuntimeError("blocked Douyin paid video: trial slider handle unavailable")
+            target_x = slider_box["x"] + slider_box["width"] * seconds / maximum
+            target_y = handle_box["y"] + handle_box["height"] / 2
+            await page.mouse.move(handle_box["x"] + handle_box["width"] / 2, target_y)
+            await page.mouse.down()
+            await page.mouse.move(target_x, target_y)
+            await page.mouse.up()
+        save = modal.get_by_role("button", name="保存", exact=True).first
+        if not await save.count():
+            raise RuntimeError("blocked Douyin paid video: missing trial save button")
+        await save.click()
+        await modal.wait_for(state="hidden", timeout=10000)
+
+    async def _set_paid_trial(self, page: Page, root, settings: DouyinPaidVideoSettings) -> None:
+        if settings.trial_enabled:
+            await self._set_paid_trial_range(
+                page, root, settings.trial_start_sec, settings.trial_end_sec
+            )
+        else:
+            await self._paid_radio(root, "无试看")
+
+    async def set_paid_video_settings(self, page: Page) -> dict | None:
+        if self.paid_video is None:
+            return None
+        requested = self.paid_video.to_snapshot()
+        if not self.paid_video.enabled:
+            self._paid_video_result = {
+                "requested": requested,
+                "observed": None,
+                "verified": True,
+            }
+            return self._paid_video_result
+
+        settings = self.paid_video
+        root = await self._open_paid_video_panel(page)
+        try:
+            await self._paid_switch(root, "付费视频", True)
+            await self._paid_radio(root, settings.sale_mode_text)
+            await self._paid_radio(root, settings.price_mode_text)
+            await self._paid_textbox(root, "价格", f"{settings.price_yuan:.2f}")
+            await self._paid_textbox(root, "商品标题", settings.product_title)
+            await self._paid_radio(root, settings.cover_mode_text)
+            if settings.cover_asset_ref is not None:
+                cover_inputs = root.locator('input[type="file"]')
+                if not await cover_inputs.count():
+                    raise RuntimeError("blocked Douyin paid video: missing cover upload input")
+                cover_input = cover_inputs.nth(await cover_inputs.count() - 1)
+                await cover_input.set_input_files(str(settings.cover_asset_ref))
+            await self._set_paid_trial(page, root, settings)
+            await self._paid_switch(root, "营销托管", settings.marketing_managed)
+            await self._paid_agreement(root, settings.agreement_confirmed)
+        except Exception as exc:
+            raise RuntimeError(f"blocked Douyin paid video: {exc}") from exc
+
+        first = await self.read_paid_video_settings(root)
+        await page.wait_for_timeout(1000)
+        second = await self.read_paid_video_settings(root)
+        expected = requested.copy()
+        if expected["coverAssetRef"]:
+            expected["coverAssetRef"] = Path(expected["coverAssetRef"]).name
+        if first != expected or second != expected or first != second:
+            raise RuntimeError("blocked Douyin paid video: two readbacks do not match requested settings")
+
+        self._paid_video_result = {
+            "requested": requested,
+            "observed": second,
+            "verified": True,
+        }
+        return self._paid_video_result
+
+    async def _read_paid_switch(self, root, name: str) -> bool:
+        control = await self._paid_switch_control(root, name)
+        try:
+            return bool(await control.is_checked())
+        except Exception:
+            aria_checked = await control.get_attribute("aria-checked")
+            if aria_checked is None:
+                raise RuntimeError(f"blocked Douyin paid video: cannot read switch {name}")
+            return aria_checked == "true"
+    async def _read_paid_textbox(self, root, label: str) -> str:
+        control = await self._paid_textbox_control(root, label)
+        return (await control.input_value()).strip()
+    async def _read_paid_agreement(self, root) -> bool:
+        label = root.get_by_text("协议确认", exact=True).first
+        if not await label.count():
+            raise RuntimeError("blocked Douyin paid video: missing agreement checkbox")
+        icon = label.locator("xpath=..").locator("div[class^='checkIcon']").first
+        if not await icon.count():
+            raise RuntimeError("blocked Douyin paid video: missing agreement checkbox")
+        return await icon.locator("svg").count() > 0
+
+    async def _read_paid_trial(self, root) -> tuple[bool, int, int]:
+        choice = await self._read_paid_choice(root, {"有试看", "无试看"}, "trialEnabled")
+        if choice == "无试看":
+            return False, 0, 0
+        value = await self._read_paid_textbox(root, "试看时长")
+        match = re.fullmatch(r"(\d+):(\d+)\s*~\s*(\d+):(\d+)", value)
+        if not match:
+            raise RuntimeError("blocked Douyin paid video: invalid trial time range")
+        start_minutes, start_seconds, end_minutes, end_seconds = (
+            int(part) for part in match.groups()
+        )
+        return (
+            True,
+            start_minutes * 60 + start_seconds,
+            end_minutes * 60 + end_seconds,
+        )
+    async def _read_paid_choice(self, root, allowed: set[str], field_name: str) -> str:
+        values = set()
+        for value in allowed:
+            radio = root.get_by_role("radio", name=value, exact=True).first
+            if not await radio.count():
+                continue
+            label = radio.locator("xpath=ancestor::label[1]")
+            classes = await label.get_attribute("class") if await label.count() else ""
+            if classes and "semi-radio-checked" in classes:
+                values.add(value)
+        if not values:
+            checked = root.get_by_role("radio", checked=True)
+            for index in range(await checked.count()):
+                radio = checked.nth(index)
+                label = radio.locator("xpath=ancestor::label[1]")
+                text = await (label if await label.count() else radio).inner_text()
+                if text.strip():
+                    values.add(text.strip())
+        matches = values & allowed
+        if len(matches) != 1:
+            raise RuntimeError(f"blocked Douyin paid video: cannot read {field_name}")
+        return next(iter(matches))
+
+    async def read_paid_video_settings(self, root) -> dict:
+        try:
+            cover_mode = await self._read_paid_choice(
+                root, {"使用原视频封面", "上传新封面"}, "coverModeText"
+            )
+            cover_mode_text = {
+                "使用原视频封面": "当前封面",
+                "上传新封面": "更改封面",
+            }[cover_mode]
+            cover_asset_ref = None
+            if cover_mode_text == "更改封面":
+                cover_inputs = root.locator('input[type="file"]')
+                if await cover_inputs.count():
+                    cover_input = cover_inputs.nth(await cover_inputs.count() - 1)
+                    cover_files = await cover_input.evaluate(
+                        "(input) => input.files && input.files[0] ? input.files[0].name : ''"
+                    )
+                    cover_asset_ref = cover_files or None
+            trial_enabled, trial_start_sec, trial_end_sec = await self._read_paid_trial(root)
+            return {
+                "enabled": await self._read_paid_switch(root, "付费视频"),
+                "saleModeText": await self._read_paid_choice(
+                    root, {"单点售卖", "组合售卖"}, "saleModeText"
+                ),
+                "priceModeText": await self._read_paid_choice(
+                    root, {"付费视频", "付费视频（会员免费看）", "会员视频"}, "priceModeText"
+                ),
+                "priceYuan": f"{Decimal(await self._read_paid_textbox(root, '价格')):.2f}",
+                "productTitle": await self._read_paid_textbox(root, "商品标题"),
+                "coverModeText": cover_mode_text,
+                "coverAssetRef": cover_asset_ref,
+                "trialEnabled": trial_enabled,
+                "trialStartSec": trial_start_sec,
+                "trialEndSec": trial_end_sec,
+                "marketingManaged": await self._read_paid_switch(root, "营销托管"),
+                "subtitleModeText": self.paid_video.subtitle_mode_text if self.paid_video else "",
+                "agreementConfirmed": await self._read_paid_agreement(root),
+                "collectionId": None,
+            }
+        except (KeyError, ValueError, TypeError) as exc:
+            raise RuntimeError(f"blocked Douyin paid video: invalid readback: {exc}") from exc
+
     async def upload(self, playwright: Playwright) -> dict:
         douyin_logger.info(_msg("🧍", "小人先检查 cookie、视频文件、封面和发布时间"))
         await self.validate_upload_args()
@@ -1084,6 +1396,13 @@ class DouYinVideo(DouYinBaseUploader):
         await self.set_video_file_input(page, "div[class^='container'] input")
 
         while True:
+            current_url = page.url
+            if "creator.douyin.com/creator-micro/content/post/video" in current_url:
+                douyin_logger.info(_msg("🥳", "已经进入 version_2 发布页面"))
+                break
+            if "creator.douyin.com/creator-micro/content/publish" in current_url:
+                douyin_logger.info(_msg("🥳", "已经进入 version_1 发布页面"))
+                break
             try:
                 await page.wait_for_url(
                     "https://creator.douyin.com/creator-micro/content/publish?enter_from=publish_page",
@@ -1131,6 +1450,7 @@ class DouYinVideo(DouYinBaseUploader):
         await self.set_thumbnail(page)
 
         await self.apply_self_declaration(page)
+        await self.set_paid_video_settings(page)
 
         if self.collection:
             await self.set_collection(page, self.collection)
@@ -1142,6 +1462,27 @@ class DouYinVideo(DouYinBaseUploader):
 
         if self.publish_strategy == DOUYIN_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time_douyin(page, self.publish_date)
+
+        observed_identity = await extract_douyin_identity_from_context(context, session=session)
+        assert_same_publish_identity(expected_identity, observed_identity)
+        if not self.submit:
+            if await save_storage_state_if_owned(session, self.account_file):
+                douyin_logger.success(_msg("🥳", "cookie 更新完毕"))
+            result = {
+                "status": "prepared",
+                "platform": "douyin",
+                "browser_name": self.browser_name,
+                "cdp_port": self.cdp_port,
+                "has_stable_id": bool(expected_identity.stable_id),
+                "account_match": True,
+                "submitted": False,
+                "paid_video": self._paid_video_result,
+                "url": page.url,
+                "scheduled_at": None,
+                "focus_fallback_used": session.focus_fallback_used,
+            }
+            self._upload_succeeded = True
+            return result
 
         while True:
             try:
@@ -1170,7 +1511,6 @@ class DouYinVideo(DouYinBaseUploader):
                 if self.debug:
                     await page.screenshot(full_page=True)
                 await asyncio.sleep(0.5)
-
         if await save_storage_state_if_owned(session, self.account_file):
             douyin_logger.success(_msg("🥳", "cookie 更新完毕"))
         await asyncio.sleep(2)
@@ -1179,8 +1519,10 @@ class DouYinVideo(DouYinBaseUploader):
             "platform": "douyin",
             "browser_name": self.browser_name,
             "cdp_port": self.cdp_port,
-            "stable_id": expected_identity.stable_id,
+            "has_stable_id": bool(expected_identity.stable_id),
+            "account_match": True,
             "submitted": True,
+            "paid_video": self._paid_video_result,
             "url": page.url if "content/manage" in page.url else "",
             "scheduled_at": self.publish_date.isoformat() if self.publish_strategy == DOUYIN_PUBLISH_STRATEGY_SCHEDULED else None,
             "focus_fallback_used": session.focus_fallback_used,

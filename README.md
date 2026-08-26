@@ -276,6 +276,56 @@ sau douyin upload-video \
 ```
 
 抖音额外支持商品链接、商品标题、合集和图文 BGM。遇到短信验证码挑战会停止自动发布，不读取或猜测验证码。
+付费视频使用 Peach 单个 `publishTarget` JSON，通过 `--paid-target-config` 传入；不要传整个 job。示例：
+
+```json
+{
+  "platform": "douyin",
+  "platformAccountId": "<DOUYIN_STABLE_ID>",
+  "settings": {
+    "douyin": {
+      "paidVideo": {
+        "enabled": true,
+        "saleModeText": "单点售卖",
+        "priceModeText": "付费视频",
+        "priceYuan": "1.00",
+        "productTitle": "SAU付费功能测试",
+        "coverModeText": "当前封面",
+        "coverAssetRef": null,
+        "trialEnabled": true,
+        "trialStartSec": 0,
+        "trialEndSec": 15,
+        "marketingManaged": false,
+        "subtitleModeText": "使用成片内已有双语字幕",
+        "agreementConfirmed": true,
+        "collectionId": null
+      }
+    }
+  }
+}
+```
+
+预提交（上传并设置付费控件，但绝不点击最终发布按钮）：
+
+```bash
+sau douyin upload-video \
+  --account sau9225 \
+  --file videos/demo.mp4 \
+  --title "付费预提交测试" \
+  --paid-target-config /tmp/douyin-paid-target.json \
+  --no-submit \
+  --browser 9225
+```
+
+规则：
+
+- `platformAccountId` 会自动成为目标账号；若同时传 `--target-account`，两者必须完全一致。账号在上传前和提交前各核验一次，结果只报告是否匹配，不输出完整 ID。
+- 金额为 `1–1000` 元、最多两位小数；商品标题最多 28 个 Unicode 字符；试看窗口至少 10 秒且不超过视频总时长的一半。
+- 售卖方式只支持 `单点售卖`、`组合售卖`；价格模式只支持 `付费视频`、`付费视频（会员免费看）`、`会员视频`；字幕模式第一版只支持 `使用成片内已有双语字幕`。
+- `coverModeText` 为 `更改封面` 时，`coverAssetRef` 必须是存在的本地图片；`collectionId` 必须为 `null`，付费视频不能同时使用 `--collection`。
+- `enabled=false` 只校验配置，不操作付费 UI；开启付费时必须确认协议。付费设置后会连续回读两次，任一次不一致都 fail closed。
+- `--no-submit` 与 `--schedule` 互斥；成功返回 `status=prepared`、`submitted=false`。不传付费配置时，原有免费上传行为不变。
+
 
 ### Bilibili
 
