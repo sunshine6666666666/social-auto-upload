@@ -392,7 +392,7 @@ sau youtube upload-video \
   --task-id youtube-demo-001
 ```
 
-YouTube 预约发布会读回 Video ID、预约时间、可见性和处理失败标记。找不到最终 Publish/Schedule 按钮会直接报错，不再把“等待手工点击”误报成成功。
+YouTube 预约发布会读回 Video ID、预约时间、可见性和处理失败标记；成功回执统一包含 `status=success`、`submitted=true`。找不到最终 Publish/Schedule 按钮会直接报错，不再把“等待手工点击”误报成成功。
 
 只准备到最终页面而不点击发布：
 

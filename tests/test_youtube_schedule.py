@@ -373,6 +373,75 @@ class ScheduleControlWaitTests(unittest.TestCase):
 
 
 class YouTubeRecoverableFailureTests(unittest.TestCase):
+    def test_scheduled_success_preserves_submitted_true_in_final_receipt(self):
+        class Locator:
+            first = None
+
+            def __init__(self):
+                self.first = self
+
+            async def wait_for(self, **_kwargs):
+                return None
+
+            async def set_input_files(self, _path):
+                return None
+
+        class Page:
+            url = "https://studio.youtube.com/channel/UC1234567890123456789012/videos"
+
+            def __init__(self):
+                self.keyboard = MagicMock()
+
+            async def content(self):
+                return '<script>{"channelId":"UC1234567890123456789012"}</script>'
+
+            async def goto(self, *_args, **_kwargs):
+                return None
+
+            async def wait_for_timeout(self, _milliseconds):
+                return None
+
+            def set_default_timeout(self, _timeout):
+                return None
+
+            def locator(self, _selector):
+                return Locator()
+
+        class Session:
+            context = MagicMock()
+            focus_fallback_used = False
+            new_task_page = AsyncMock()
+
+        page = Page()
+        session = Session()
+        session.new_task_page.return_value = page
+        app = __import__("uploader.youtube_uploader.main", fromlist=["YouTubeVideo"]).YouTubeVideo(
+            "title", __file__, [], "account.json", cdp_url="http://127.0.0.1:9225",
+            schedule=datetime(2099, 8, 2, 6, 0), browser_name="managed", cdp_port=9225,
+        )
+        scheduled = {
+            "videoId": "QMiJvZPJJv0",
+            "publishUrl": "https://www.youtube.com/watch?v=QMiJvZPJJv0",
+            "visibility": "scheduled",
+            "scheduledAt": "2099-08-02T06:00:00+08:00",
+        }
+        with patch("uploader.youtube_uploader.main.open_browser_session", new=AsyncMock(return_value=session)), patch(
+            "uploader.youtube_uploader.main.set_init_script", new=AsyncMock(return_value=session.context)
+        ), patch("uploader.youtube_uploader.main._fill_editable", new=AsyncMock()), patch(
+            "uploader.youtube_uploader.main._wait_upload_complete", new=AsyncMock(return_value=True)
+        ), patch("uploader.youtube_uploader.main.advance_to_visibility", new=AsyncMock()), patch(
+            "uploader.youtube_uploader.main._configure_scheduled_publication", new=AsyncMock()
+        ), patch("uploader.youtube_uploader.main.assert_youtube_publish_identity", new=AsyncMock()), patch(
+            "uploader.youtube_uploader.main._click_if_present", new=AsyncMock(return_value=True)
+        ), patch("uploader.youtube_uploader.main._click_required_final_button", new=AsyncMock()), patch(
+            "uploader.youtube_uploader.main.readback_scheduled_publication", new=AsyncMock(return_value=scheduled)
+        ), patch("uploader.youtube_uploader.main.save_storage_state_if_owned", new=AsyncMock()):
+            result = asyncio.run(app.upload(MagicMock()))
+
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(result["submitted"])
+        self.assertEqual(result["videoId"], "QMiJvZPJJv0")
+
     def test_missing_schedule_button_returns_draft_evidence_without_success(self):
         class Locator:
             first = None

@@ -740,6 +740,7 @@ class YouTubeVideo(BaseVideoUploader):
             {
                 "status": "success",
                 "platform": "youtube",
+                "submitted": self.submit,
                 "browser_name": self.browser_name,
                 "cdp_port": self.cdp_port,
                 "stable_id": expected_identity.stable_id,
