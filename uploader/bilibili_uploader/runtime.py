@@ -563,7 +563,13 @@ def resolve_bilibili_section_id(account_file: Path, season_id: int, timeout: int
     raise RuntimeError(f"Bilibili season {season_id} has no section")
 
 
-def read_bilibili_archive_matches(account_file: Path, title: str, timeout: int = 20, attempts: int = 8) -> list[dict]:
+def read_bilibili_archive_matches(
+    account_file: Path,
+    title: str,
+    timeout: int = 20,
+    attempts: int = 8,
+    exclude_aids: set[int] | None = None,
+) -> list[dict]:
     """Read exact-title archive evidence without returning cookies or page text."""
     import time
 
@@ -581,6 +587,7 @@ def read_bilibili_archive_matches(account_file: Path, title: str, timeout: int =
     }
     params = {"pn": 1, "ps": 10}
     needle = title.strip()
+    excluded = exclude_aids or set()
     last_error = ""
     for attempt in range(attempts):
         response = requests.get(
@@ -603,9 +610,12 @@ def read_bilibili_archive_matches(account_file: Path, title: str, timeout: int =
                 if (inner.get("title") or "").strip() == needle:
                     aid = inner.get("aid") or inner.get("id")
                     if aid:
+                        normalized_aid = int(aid)
+                        if normalized_aid in excluded:
+                            continue
                         matches.append(
                             {
-                                "aid": int(aid),
+                                "aid": normalized_aid,
                                 "title": str(inner.get("title") or ""),
                                 "state": inner.get("state") or inner.get("status") or inner.get("audit_status"),
                                 "dtime": inner.get("dtime") or inner.get("pubtime") or None,

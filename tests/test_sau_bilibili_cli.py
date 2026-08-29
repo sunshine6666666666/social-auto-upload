@@ -242,6 +242,32 @@ class BilibiliCliTests(unittest.TestCase):
         self.assertEqual(run_biliup.call_count, 1)
         self.assertEqual(run_biliup.call_args.args[0], ["-u", str(account_file), "renew"])
 
+    def test_upload_bilibili_video_allows_same_title_and_returns_new_aid(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            account_file = Path(temp_dir) / "account.json"
+            account_file.write_text(
+                '{"cookie_info":{},"token_info":{"mid":518800384}}',
+                encoding="utf-8",
+            )
+            request = sau_cli.BilibiliVideoUploadRequest(
+                account_name="shuimitao-english", video_file=Path("demo.mp4"),
+                title="相同标题", description="hello", tid=36,
+                tags=[], publish_date=0,
+            )
+            success = SimpleNamespace(returncode=0, stdout="", stderr="")
+            old = {"aid": 100, "title": "相同标题", "cover_present": True}
+            new = {"aid": 101, "title": "相同标题", "cover_present": True}
+            with patch("sau_cli.resolve_account_file", return_value=account_file), patch(
+                "sau_cli.run_biliup_command", side_effect=[success, success]
+            ) as run_biliup, patch(
+                "sau_cli.read_bilibili_archive_matches", side_effect=[[old], [new]]
+            ) as read_matches:
+                result = asyncio.run(sau_cli.upload_bilibili_video(request))
+
+        self.assertEqual(result["work_id"], "101")
+        self.assertEqual(run_biliup.call_args_list[1].args[0][2], "upload")
+        self.assertEqual(read_matches.call_args_list[1].kwargs["exclude_aids"], {100})
+
     def test_build_parser_accepts_bilibili_collection_for_upload_video(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             video = Path(temp_dir) / "demo.mp4"

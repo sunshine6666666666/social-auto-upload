@@ -894,27 +894,32 @@ async def upload_bilibili_video(request: BilibiliVideoUploadRequest) -> dict:
         has_cookie_data = isinstance(account_payload.get("cookie_info"), dict)
     except (OSError, ValueError, json.JSONDecodeError):
         has_cookie_data = False
+    existing_aids: set[int] = set()
     if has_cookie_data:
         existing_matches = read_bilibili_archive_matches(account_file, request.title, attempts=1)
-        if existing_matches:
-            raise RuntimeError("Bilibili exact title already exists; refusing duplicate submission")
+        existing_aids = {int(item["aid"]) for item in existing_matches}
 
     result = run_biliup_command(arguments)
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "").strip() or "Bilibili upload failed")
 
-    if request.collection and season_id is not None and section_id is not None:
-        # biliup submits via the APP API which ignores season_id; add the archive to the
-        # collection afterwards through the creator episodes/add API.
-        aid = find_bilibili_archive_aid(account_file, request.title)
-        cid = fetch_bilibili_archive_cid(account_file, aid)
-        add_archive_to_season(account_file, aid, cid, request.title, section_id)
     matches = []
     if has_cookie_data:
-        matches = read_bilibili_archive_matches(account_file, request.title)
+        matches = read_bilibili_archive_matches(
+            account_file, request.title, exclude_aids=existing_aids
+        )
         if len(matches) != 1:
-            raise RuntimeError(f"Bilibili archive title matched {len(matches)} records; expected exactly one")
+            raise RuntimeError(
+                f"Bilibili new archive title matched {len(matches)} records; expected exactly one"
+            )
     evidence = matches[0] if matches else {}
+    if request.collection and season_id is not None and section_id is not None:
+        # biliup's APP submit ignores season_id; attach the newly created archive afterwards.
+        aid = int(evidence["aid"]) if evidence.get("aid") else find_bilibili_archive_aid(
+            account_file, request.title
+        )
+        cid = fetch_bilibili_archive_cid(account_file, aid)
+        add_archive_to_season(account_file, aid, cid, request.title, section_id)
     if schedule and evidence.get("dtime") is not None:
         try:
             observed_dtime = int(evidence["dtime"])

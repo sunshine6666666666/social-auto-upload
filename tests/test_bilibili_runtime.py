@@ -13,6 +13,7 @@ from uploader.bilibili_uploader.runtime import (
     ensure_biliup_binary,
     extract_bilibili_dom_identity,
     export_bilibili_cdp_account,
+    read_bilibili_archive_matches,
     resolve_bilibili_season_id,
     run_biliup_command,
 )
@@ -107,6 +108,33 @@ class BilibiliSeasonResolutionTests(unittest.TestCase):
     def test_resolve_season_id_raises_when_account_missing(self):
         with self.assertRaises(RuntimeError):
             resolve_bilibili_season_id(Path("/nonexistent/account.json"), "英语新闻博客")
+
+    def test_archive_readback_ignores_old_same_title_until_new_aid_appears(self):
+        with tempfile.TemporaryDirectory() as td:
+            account = self._write_account(Path(td) / "account.json")
+            responses = []
+            for aids in ([100], [100, 101]):
+                response = Mock()
+                response.json.return_value = {
+                    "code": 0,
+                    "data": {
+                        "arc_audits": [
+                            {"Archive": {"aid": aid, "title": "相同标题"}}
+                            for aid in aids
+                        ]
+                    },
+                }
+                responses.append(response)
+            with patch(
+                "uploader.bilibili_uploader.runtime.requests.get",
+                side_effect=responses,
+            ) as get, patch("uploader.bilibili_uploader.runtime.time.sleep"):
+                matches = read_bilibili_archive_matches(
+                    account, "相同标题", attempts=2, exclude_aids={100}
+                )
+
+        self.assertEqual([item["aid"] for item in matches], [101])
+        self.assertEqual(get.call_count, 2)
 
     @patch("uploader.bilibili_uploader.runtime.fetch_latest_release")
     def test_ensure_biliup_binary_reuses_local_when_up_to_date(self, mock_release):
