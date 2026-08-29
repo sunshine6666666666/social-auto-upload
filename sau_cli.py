@@ -194,6 +194,7 @@ class BilibiliVideoUploadRequest:
     tid: int
     tags: list[str]
     publish_date: datetime | int
+    line: str = "cnbd"
     thumbnail_file: Path | None = None
     charging_pay: bool = False
     collection: str | None = None
@@ -860,6 +861,8 @@ async def upload_bilibili_video(request: BilibiliVideoUploadRequest) -> dict:
         str(account_file),
         "upload",
         str(request.video_file),
+        "--line",
+        request.line,
         "--title",
         request.title,
         "--desc",
@@ -1184,6 +1187,12 @@ def build_parser() -> argparse.ArgumentParser:
     bilibili_upload_video_parser.add_argument("--desc", required=True, help="Video description")
     bilibili_upload_video_parser.add_argument("--tid", required=True, type=int, help="Bilibili category id")
     bilibili_upload_video_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
+    bilibili_upload_video_parser.add_argument(
+        "--line",
+        default="cnbd",
+        choices=["bldsa", "cnbldsa", "andsa", "atdsa", "bda2", "cnbd", "anbd", "atbd", "tx", "cntx", "antx", "attx", "bda", "txa", "alia"],
+        help="Bilibili upload CDN line (default: cnbd)",
+    )
     bilibili_upload_video_parser.add_argument("--thumbnail", type=existing_file_path, help="Optional Bilibili cover image path")
     bilibili_upload_video_parser.add_argument("--collection", default=None, help="Optional Bilibili collection (合集) name to submit the video into")
     bilibili_upload_video_parser.add_argument(
@@ -1572,6 +1581,7 @@ async def dispatch(args: argparse.Namespace) -> int:
                 tid=args.tid,
                 tags=parse_tags(args.tags),
                 publish_date=args.schedule or 0,
+                line=args.line,
                 thumbnail_file=args.thumbnail,
                 charging_pay=args.charging_pay,
                 collection=args.collection,

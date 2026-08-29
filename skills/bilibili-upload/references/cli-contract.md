@@ -43,6 +43,7 @@ sau bilibili upload-video \
   --file <video-path> \
   --title "<title>" \
   --desc "<desc>" \
+  [--line cnbd] \
   --tid <category-id> \
   [--tags tag1,tag2] \
   [--schedule "YYYY-MM-DD HH:MM"]
@@ -57,10 +58,12 @@ sau bilibili upload-video \
 - 可选参数：
   - `--tags`
   - `--schedule`
+  - `--line`（默认 `cnbd`）
 
 ## 额外说明
 
 - `--tid` 第一版必须传
 - `--tags` 使用逗号分隔
 - `--schedule` 走 `sau` 统一时间格式
+- `--line` 选择 biliup 上传 CDN；当前默认 `cnbd`，避免依赖证书失效的旧默认线路
 - 程序会自动准备和更新 `biliup`

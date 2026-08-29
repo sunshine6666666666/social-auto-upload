@@ -361,6 +361,7 @@ sau bilibili upload-video \
   --file videos/demo.mp4 \
   --title "示例标题" \
   --desc "示例简介" \
+  --line cnbd \
   --tid 249 \
   --tags "英语,听力" \
   --thumbnail covers/bilibili.png \
@@ -368,7 +369,7 @@ sau bilibili upload-video \
   --task-id bilibili-demo-001
 ```
 
-`SAU_BILIBILI_ACCOUNT_DIR` 为每个 `--account` 保存一个固定文件 `<account>.json`。只有显式 `login` 会把当前 Bilibili Web 登录态转换为 biliup 凭证；`check` 和 `upload-video` 不重新导出浏览器。每次上传先对固定文件执行 `biliup renew`，失败时返回 `BILIBILI_AUTH_REQUIRED`，并且不会开始上传。首次使用可能需要联网准备 biliup。历史完全同名标题不阻塞：提交前只记录已有 AID，提交后只把同标题的新增 AID 作为本次成功证据，并读回排期和封面状态。
+`SAU_BILIBILI_ACCOUNT_DIR` 为每个 `--account` 保存一个固定文件 `<account>.json`。只有显式 `login` 会把当前 Bilibili Web 登录态转换为 biliup 凭证；`check` 和 `upload-video` 不重新导出浏览器。每次上传先对固定文件执行 `biliup renew`，失败时返回 `BILIBILI_AUTH_REQUIRED`，并且不会开始上传。上传线路可用 `--line` 指定，默认使用已验证的 `cnbd`。首次使用可能需要联网准备 biliup。历史完全同名标题不阻塞：提交前只记录已有 AID，提交后只把同标题的新增 AID 作为本次成功证据，并读回排期和封面状态。
 
 ### YouTube
 

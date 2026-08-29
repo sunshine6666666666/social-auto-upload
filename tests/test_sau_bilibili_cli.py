@@ -150,6 +150,18 @@ class BilibiliCliTests(unittest.TestCase):
             )
         self.assertTrue(args.charging_pay)
 
+    def test_build_parser_defaults_bilibili_upload_line_to_cnbd(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = Path(temp_dir) / "demo.mp4"
+            video.write_bytes(b"video")
+            args = sau_cli.build_parser().parse_args([
+                "bilibili", "upload-video", "--account", "creator",
+                "--file", str(video), "--title", "hello", "--desc", "hello",
+                "--tid", "36",
+            ])
+
+        self.assertEqual(args.line, "cnbd")
+
     def test_upload_bilibili_video_passes_charging_pay_to_biliup(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             account_file = Path(temp_dir) / "account.json"
@@ -200,6 +212,7 @@ class BilibiliCliTests(unittest.TestCase):
             run_biliup.call_args.args[0],
             [
                 "-u", str(account_file), "upload", "demo.mp4",
+                "--line", "cnbd",
                 "--title", "hello", "--desc", "hello", "--tid", "249",
                 "--tag", "test", "--cover", "cover.png",
             ],
