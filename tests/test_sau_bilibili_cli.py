@@ -9,9 +9,22 @@ from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 import sau_cli
+from utils.account_identity import AccountIdentity
 
 
 class BilibiliCliTests(unittest.TestCase):
+    def test_bilibili_account_files_use_fixed_external_directory_and_account_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch.dict(
+            sau_cli.os.environ,
+            {"SAU_BILIBILI_ACCOUNT_DIR": temp_dir},
+        ):
+            first = sau_cli.resolve_account_file("bilibili", "shuimitao-english")
+            second = sau_cli.resolve_account_file("bilibili", "stella-english")
+
+        self.assertEqual(first, Path(temp_dir) / "shuimitao-english.json")
+        self.assertEqual(second, Path(temp_dir) / "stella-english.json")
+        self.assertNotEqual(first, second)
+
     def test_build_parser_accepts_bilibili_login(self):
         parser = sau_cli.build_parser()
         args = parser.parse_args(["bilibili", "login", "--account", "creator"])
@@ -41,6 +54,66 @@ class BilibiliCliTests(unittest.TestCase):
         with patch("sau_cli.check_bilibili_account", new=AsyncMock(return_value=True)):
             code = asyncio.run(sau_cli.dispatch(args))
         self.assertEqual(code, 0)
+
+    def test_check_bilibili_with_cdp_renews_without_reexporting(self):
+        identity = AccountIdentity(
+            platform="bilibili", logged_in=True, stable_id="518800384",
+            display_name="水蜜桃英语", profile_url=None,
+            browser_name="SAU-自媒体运营-2号-9226", cdp_port=9226, extra={},
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            account_file = Path(temp_dir) / "shuimitao-english.json"
+            account_file.write_text('{"token_info":{"mid":518800384}}', encoding="utf-8")
+            with patch("sau_cli.resolve_account_file", return_value=account_file), patch(
+                "sau_cli.get_bilibili_cdp_identity", new=AsyncMock(return_value=identity)
+            ) as get_identity, patch(
+                "sau_cli.export_bilibili_cdp_account", new=AsyncMock()
+            ) as export_account, patch(
+                "sau_cli.run_biliup_command",
+                return_value=SimpleNamespace(returncode=0, stdout="", stderr=""),
+            ):
+                valid = asyncio.run(sau_cli.check_bilibili_account(
+                    "shuimitao-english", "http://127.0.0.1:9226"
+                ))
+
+        self.assertTrue(valid)
+        get_identity.assert_awaited_once()
+        export_account.assert_not_awaited()
+
+    def test_dispatch_bilibili_upload_with_cdp_only_reads_identity(self):
+        identity = AccountIdentity(
+            platform="bilibili", logged_in=True, stable_id="518800384",
+            display_name="水蜜桃英语", profile_url=None,
+            browser_name="SAU-自媒体运营-2号-9226", cdp_port=9226, extra={},
+        )
+        target = SimpleNamespace(
+            name="SAU-自媒体运营-2号-9226", port=9226,
+            cdp_url="http://127.0.0.1:9226",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            video = Path(temp_dir) / "demo.mp4"
+            video.write_bytes(b"video")
+            args = sau_cli.build_parser().parse_args([
+                "bilibili", "upload-video", "--account", "shuimitao-english",
+                "--file", str(video), "--title", "hello", "--desc", "hello",
+                "--tid", "36", "--cdp-url", target.cdp_url,
+                "--target-account", "518800384",
+            ])
+            with patch(
+                "sau_cli._resolve_upload_target", new=AsyncMock(return_value=target)
+            ), patch(
+                "sau_cli.get_bilibili_cdp_identity", new=AsyncMock(return_value=identity)
+            ) as get_identity, patch(
+                "sau_cli.export_bilibili_cdp_account", new=AsyncMock(return_value=identity)
+            ) as export_account, patch(
+                "sau_cli.upload_bilibili_video",
+                new=AsyncMock(return_value={"status": "success"}),
+            ):
+                code = asyncio.run(sau_cli.dispatch(args))
+
+        self.assertEqual(code, 0)
+        get_identity.assert_awaited()
+        export_account.assert_not_awaited()
 
     def test_login_bilibili_account_returns_friendly_message_without_terminal(self):
         with patch("sau_cli.has_interactive_terminal", return_value=False):
@@ -131,6 +204,43 @@ class BilibiliCliTests(unittest.TestCase):
                 "--tag", "test", "--cover", "cover.png",
             ],
         )
+
+    def test_upload_bilibili_video_renews_before_upload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            account_file = Path(temp_dir) / "account.json"
+            account_file.write_text("{}", encoding="utf-8")
+            request = sau_cli.BilibiliVideoUploadRequest(
+                account_name="creator", video_file=Path("demo.mp4"),
+                title="hello", description="hello", tid=36,
+                tags=[], publish_date=0,
+            )
+            success = SimpleNamespace(returncode=0, stdout="", stderr="")
+            with patch("sau_cli.resolve_account_file", return_value=account_file), patch(
+                "sau_cli.run_biliup_command", side_effect=[success, success]
+            ) as run_biliup:
+                asyncio.run(sau_cli.upload_bilibili_video(request))
+
+        self.assertEqual(run_biliup.call_args_list[0].args[0], ["-u", str(account_file), "renew"])
+        self.assertEqual(run_biliup.call_args_list[1].args[0][2], "upload")
+
+    def test_upload_bilibili_video_stops_before_upload_when_renew_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            account_file = Path(temp_dir) / "account.json"
+            account_file.write_text("{}", encoding="utf-8")
+            request = sau_cli.BilibiliVideoUploadRequest(
+                account_name="creator", video_file=Path("demo.mp4"),
+                title="hello", description="hello", tid=36,
+                tags=[], publish_date=0,
+            )
+            failure = SimpleNamespace(returncode=1, stdout="", stderr="expired")
+            with patch("sau_cli.resolve_account_file", return_value=account_file), patch(
+                "sau_cli.run_biliup_command", return_value=failure
+            ) as run_biliup:
+                with self.assertRaisesRegex(RuntimeError, "BILIBILI_AUTH_REQUIRED"):
+                    asyncio.run(sau_cli.upload_bilibili_video(request))
+
+        self.assertEqual(run_biliup.call_count, 1)
+        self.assertEqual(run_biliup.call_args.args[0], ["-u", str(account_file), "renew"])
 
     def test_build_parser_accepts_bilibili_collection_for_upload_video(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -313,12 +313,13 @@ class DouyinScheduleTests(unittest.TestCase):
 
         def eval_side(selector, js):
             if "list-hour" in selector:
-                cur = state["hour"]
-                state["hour"] += 1
-                return f"{cur:02d}时"
+                return f"{state['hour']:02d}时"
             return "00分"
 
         page = self._make_wheel_page(eval_side)
+        page.mouse.wheel.side_effect = lambda _x, y: state.update(
+            hour=state["hour"] + (1 if y > 0 else -1)
+        )
 
         async def run():
             await app._spin_wheel_to(page, "hour", 8)
@@ -334,12 +335,13 @@ class DouyinScheduleTests(unittest.TestCase):
 
         def eval_side(selector, js):
             if "list-hour" in selector:
-                cur = state["hour"]
-                state["hour"] -= 1
-                return f"{cur:02d}时"
+                return f"{state['hour']:02d}时"
             return "30分"
 
         page = self._make_wheel_page(eval_side)
+        page.mouse.wheel.side_effect = lambda _x, y: state.update(
+            hour=state["hour"] + (1 if y > 0 else -1)
+        )
 
         async def run():
             await app._spin_wheel_to(page, "hour", 6)
@@ -349,6 +351,74 @@ class DouyinScheduleTests(unittest.TestCase):
         self.assertGreater(page.mouse.wheel.call_count, 0)
         args = page.mouse.wheel.call_args_list
         self.assertLess(args[0].args[1], 0)
+
+    def test_spin_wheel_to_reverses_after_overshoot(self):
+        app = self._make_app()
+        state = {"hour": 12}
+
+        def eval_side(selector, js):
+            if "list-hour" in selector:
+                return f"{state['hour']:02d}时"
+            return "00分"
+
+        async def wheel_side(_x, y):
+            if y > 0 and state["hour"] == 12:
+                state["hour"] = 14
+            else:
+                state["hour"] += 1 if y > 0 else -1
+
+        page = self._make_wheel_page(eval_side)
+        page.mouse.wheel.side_effect = wheel_side
+
+        asyncio.run(app._spin_wheel_to(page, "hour", 13))
+
+        self.assertEqual(
+            [call.args[1] for call in page.mouse.wheel.call_args_list[:2]],
+            [36, -36],
+        )
+
+    def test_spin_wheel_to_waits_for_target_to_settle(self):
+        app = self._make_app()
+        page = self._make_wheel_page(
+            ["12时", "13时", "15时", "14时", "13时", "13时"]
+        )
+
+        asyncio.run(app._spin_wheel_to(page, "hour", 13))
+
+        self.assertEqual(
+            [call.args[1] for call in page.mouse.wheel.call_args_list],
+            [36, -36, -36],
+        )
+
+    def test_spin_wheel_to_waits_for_wheel_animation(self):
+        app = self._make_app()
+        state = {"hour": 19}
+        clock = [0.0]
+        ready_at = [0.0]
+
+        def eval_side(selector, js):
+            if "list-hour" in selector:
+                return f"{state['hour']:02d}时"
+            return "00分"
+
+        async def wheel_side(_x, y):
+            if clock[0] < ready_at[0]:
+                state["hour"] += 1
+            else:
+                state["hour"] -= 1
+            ready_at[0] = clock[0] + 1.0
+
+        async def sleep_side(delay):
+            clock[0] += delay
+
+        page = self._make_wheel_page(eval_side)
+        page.mouse.wheel.side_effect = wheel_side
+
+        with patch(
+            "uploader.douyin_uploader.main.asyncio.sleep",
+            new=AsyncMock(side_effect=sleep_side),
+        ):
+            asyncio.run(app._spin_wheel_to(page, "hour", 13))
 
     def _make_locator(self, **attrs):
         """A fake locator supporting both `.click()` (direct) and `.first.<op>()`."""
@@ -362,37 +432,86 @@ class DouyinScheduleTests(unittest.TestCase):
         loc.first = loc
         return loc
 
-    def test_set_schedule_time_readback_mismatch_raises(self):
+    def _make_schedule_page(self, readbacks, calendar_month="2026年 8月"):
         from unittest.mock import MagicMock
 
-        app = self._make_app()
         page = MagicMock()
-
         radio_locator = self._make_locator()
         date_input_locator = self._make_locator()
-        date_input_locator.input_value = AsyncMock(return_value="2026-08-13 06:03")
+        date_input_locator.input_value = AsyncMock(side_effect=readbacks)
         day_cell = self._make_locator()
         time_switch = self._make_locator()
+        month_label = self._make_locator()
+        month_label.inner_text = AsyncMock(return_value=calendar_month)
+        previous_month = self._make_locator()
+        next_month = self._make_locator()
+        navigation_buttons = MagicMock()
+        navigation_buttons.nth = MagicMock(
+            side_effect=lambda index: previous_month if index == 0 else next_month
+        )
         page.keyboard = SimpleNamespace(press=AsyncMock())
-        app._spin_wheel_to = AsyncMock()
+        page.next_month_button = next_month
 
-        def locator_side(sel):
-            if "日期和时间" in sel:
+        def locator_side(selector):
+            if "日期和时间" in selector:
                 return date_input_locator
-            if "semi-datepicker:visible span" in sel:
+            if "semi-datepicker-navigation-month" in selector:
+                return month_label
+            if "semi-datepicker-navigation button" in selector:
+                return navigation_buttons
+            if "semi-datepicker:visible span" in selector:
                 return day_cell
-            if "semi-datepicker-switch-text" in sel:
+            if "semi-datepicker-switch-text" in selector:
                 return time_switch
             return radio_locator
 
         page.locator = MagicMock(side_effect=locator_side)
+        return page
 
-        async def run():
-            await app.set_schedule_time_douyin(page, datetime(2026, 8, 13, 6, 0))
+    def test_set_schedule_time_navigates_to_target_month(self):
+        app = self._make_app()
+        app._spin_wheel_to = AsyncMock()
+        page = self._make_schedule_page(
+            ["2026-09-06 13:00"], calendar_month="2026年 8月"
+        )
 
-        with self.assertRaises(RuntimeError) as ctx:
-            asyncio.run(run())
-        self.assertIn("回读核验失败", str(ctx.exception))
+        asyncio.run(
+            app.set_schedule_time_douyin(page, datetime(2026, 9, 6, 13, 0))
+        )
+
+        page.next_month_button.click.assert_awaited_once_with(timeout=6000)
+
+    def test_set_schedule_time_retries_after_readback_mismatch(self):
+        app = self._make_app()
+        app._spin_wheel_to = AsyncMock()
+        page = self._make_schedule_page(
+            ["2026-08-13 15:00", "2026-08-13 13:00"]
+        )
+
+        asyncio.run(
+            app.set_schedule_time_douyin(page, datetime(2026, 8, 13, 13, 0))
+        )
+
+        self.assertEqual(app._spin_wheel_to.await_count, 4)
+
+    def test_set_schedule_time_readback_mismatch_raises(self):
+        app = self._make_app()
+        app._spin_wheel_to = AsyncMock()
+        page = self._make_schedule_page(
+            ["2026-08-13 16:00", "2026-08-13 14:00", "2026-08-13 15:00"]
+        )
+
+        with self.assertRaises(RuntimeError) as context:
+            asyncio.run(
+                app.set_schedule_time_douyin(page, datetime(2026, 8, 13, 13, 0))
+            )
+
+        message = str(context.exception)
+        self.assertIn("回读核验失败", message)
+        self.assertIn("尝试 3 次", message)
+        self.assertIn("期望 2026-08-13 13:00", message)
+        self.assertIn("最后实际 2026-08-13 15:00", message)
+        self.assertEqual(app._spin_wheel_to.await_count, 6)
 
 
 class DouyinLargeFileInputTests(unittest.TestCase):

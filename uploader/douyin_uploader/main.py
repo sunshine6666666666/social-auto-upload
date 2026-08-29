@@ -549,38 +549,67 @@ class DouYinBaseUploader(BaseVideoUploader):
         await asyncio.sleep(1)
 
         date_input = page.locator('.semi-input[placeholder="日期和时间"]')
-        await date_input.click()
-        await asyncio.sleep(1.5)
-
-        # 1) 日历点选目标日期（DD）；月份不匹配时先点月份导航（当前实现先支持同月/相邻月场景，
-        #    以页面可见月份内的日期为准；跨月由调用方保证 --schedule 在合理范围内）
-        day_str = str(publish_date.day)
-        day_cell = page.locator(
-            ".semi-datepicker:visible span:not([class]):not(:has(*)):text-is('{}')".format(day_str)
-        ).first
-        await day_cell.click(timeout=6000)
-        await asyncio.sleep(1)
-
-        # 2) 打开时间滚轮
-        time_switch = page.locator(".semi-datepicker-switch-text:has-text(':')").first
-        await time_switch.click(timeout=6000)
-        await asyncio.sleep(1.5)
-
-        # 3) 用 wheel 驱动 hour wheel 到目标小时
-        await self._spin_wheel_to(page, "hour", publish_date.hour)
-        # 4) 用 wheel 驱动 minute wheel 到目标分钟
-        await self._spin_wheel_to(page, "minute", publish_date.minute)
-
-        # 5) 关闭面板并回读核验
-        await page.keyboard.press("Escape")
-        await asyncio.sleep(1.5)
-        actual = await date_input.input_value()
         expected = publish_date.strftime("%Y-%m-%d %H:%M")
-        if actual != expected:
-            raise RuntimeError(
-                f"抖音定时时间回读核验失败：期望 {expected}，实际 {actual}"
+        actual = ""
+
+        for attempt in range(1, 4):
+            await date_input.click()
+            await asyncio.sleep(1.5)
+
+            current_month_text = await page.locator(
+                ".semi-datepicker-navigation-month"
+            ).inner_text()
+            current_month = datetime.strptime(
+                current_month_text.replace(" ", "").strip(), "%Y年%m月"
             )
-        douyin_logger.info(_msg("📅", f"已设置定时发布 {actual}"))
+            month_delta = (
+                (publish_date.year - current_month.year) * 12
+                + publish_date.month
+                - current_month.month
+            )
+            if month_delta:
+                navigation_buttons = page.locator(
+                    ".semi-datepicker-navigation button"
+                )
+                button_index = 2 if month_delta > 0 else 0
+                for _ in range(abs(month_delta)):
+                    await navigation_buttons.nth(button_index).click(timeout=6000)
+                    await asyncio.sleep(0.5)
+
+            day_cell = page.locator(
+                ".semi-datepicker:visible span:not([class]):not(:has(*)):text-is('{}')".format(
+                    publish_date.day
+                )
+            ).first
+            await day_cell.click(timeout=6000)
+            await asyncio.sleep(1)
+
+            time_switch = page.locator(
+                ".semi-datepicker-switch-text:has-text(':')"
+            ).first
+            await time_switch.click(timeout=6000)
+            await asyncio.sleep(1.5)
+
+            await self._spin_wheel_to(page, "hour", publish_date.hour)
+            await self._spin_wheel_to(page, "minute", publish_date.minute)
+
+            await page.keyboard.press("Escape")
+            await asyncio.sleep(1.5)
+            actual = await date_input.input_value()
+            if actual == expected:
+                douyin_logger.info(_msg("📅", f"已设置定时发布 {actual}"))
+                return
+            if attempt < 3:
+                douyin_logger.warning(
+                    _msg(
+                        "⚠️",
+                        f"抖音定时时间第 {attempt} 次回读不一致：期望 {expected}，实际 {actual}，准备重试",
+                    )
+                )
+
+        raise RuntimeError(
+            f"抖音定时时间回读核验失败：尝试 3 次，期望 {expected}，最后实际 {actual}"
+        )
 
     async def _spin_wheel_to(self, page, wheel_kind: str, target: int) -> None:
         """驱动 Semi ScrollList 滚轮，把选中项滚到 target。
@@ -600,30 +629,34 @@ class DouYinBaseUploader(BaseVideoUploader):
         cx = box["x"] + box["width"] / 2
         cy = box["y"] + box["height"] / 2
 
-        # 用 JS 读取当前选中值（selected item 文本，如 "15时" / "30分"）
-        current_text = await page.eval_on_selector(
-            f"[class*='{kind_class}'] .semi-scrolllist-item-selected",
-            "el => el.innerText.trim()",
-        )
-        current = int("".join(ch for ch in current_text if ch.isdigit()))
-        step = 1 if target >= current else -1
-        guard = 0
-        # 把鼠标移到 wheel 中心，确保 wheel 事件落在 wheel 上
-        await page.mouse.move(cx, cy)
-        while current != target and guard < 80:
-            # 每次滚动一格（约 36px），然后重读选中项；动画期间短暂等待
-            await page.mouse.wheel(0, step * 36)
-            await asyncio.sleep(0.25)
+        async def read_current() -> int:
             current_text = await page.eval_on_selector(
                 f"[class*='{kind_class}'] .semi-scrolllist-item-selected",
                 "el => el.innerText.trim()",
             )
-            current = int("".join(ch for ch in current_text if ch.isdigit()))
-            guard += 1
-        if current != target:
-            raise RuntimeError(
-                f"抖音 {wheel_kind} 滚轮未到达目标 {target}，当前 {current}"
-            )
+            return int("".join(ch for ch in current_text if ch.isdigit()))
+
+        current = await read_current()
+        stable_reads = 0
+        guard = 0
+        # 把鼠标移到 wheel 中心，确保 wheel 事件落在 wheel 上
+        await page.mouse.move(cx, cy)
+        while guard < 80:
+            if current == target:
+                stable_reads += 1
+                if stable_reads >= 2:
+                    return
+                await asyncio.sleep(0.5)
+            else:
+                stable_reads = 0
+                step = 1 if target > current else -1
+                await page.mouse.wheel(0, step * 36)
+                await asyncio.sleep(1)
+                guard += 1
+            current = await read_current()
+        raise RuntimeError(
+            f"抖音 {wheel_kind} 滚轮未稳定到达目标 {target}，当前 {current}"
+        )
 
     async def fill_title_and_description(self, page: Page, title: str, description: str, tags: list[str] | None = None):
         # 2026-06 抖音发布页 DOM：标题=input[placeholder*=填写作品标题]，描述=div.zone-container[contenteditable]
@@ -1488,7 +1521,11 @@ class DouYinVideo(DouYinBaseUploader):
                 "submitted": False,
                 "paid_video": self._paid_video_result,
                 "url": page.url,
-                "scheduled_at": None,
+                "scheduled_at": (
+                    self.publish_date.isoformat()
+                    if self.publish_strategy == DOUYIN_PUBLISH_STRATEGY_SCHEDULED
+                    else None
+                ),
                 "focus_fallback_used": session.focus_fallback_used,
             }
             self._upload_succeeded = True

@@ -3,13 +3,14 @@ import json
 import tempfile
 import unittest
 from argparse import Namespace
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import sau_cli
-from uploader.douyin_uploader.main import DouYinVideo
+from uploader.douyin_uploader.main import DOUYIN_PUBLISH_STRATEGY_SCHEDULED, DouYinVideo
 from uploader.douyin_uploader.paid_video import DouyinPaidVideoSettings, parse_peach_douyin_target
 from utils.account_identity import AccountIdentity
 from utils.browser_selector import BrowserTarget
@@ -117,18 +118,20 @@ class PaidVideoCliTests(PaidVideoParserTests):
         self.assertFalse(args.submit)
         self.assertEqual(args.paid_target_config, config)
 
-    def test_parser_rejects_schedule_and_no_submit(self):
+    def test_parser_accepts_schedule_and_no_submit(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             video = Path(temp_dir) / "demo.mp4"
             video.write_bytes(b"video")
-            with self.assertRaises(SystemExit):
-                sau_cli.build_parser().parse_args(
-                    [
-                        "douyin", "upload-video", "--account", "creator",
-                        "--file", str(video), "--title", "paid",
-                        "--schedule", "2099-01-01 00:00", "--no-submit",
-                    ]
-                )
+            args = sau_cli.build_parser().parse_args(
+                [
+                    "douyin", "upload-video", "--account", "creator",
+                    "--file", str(video), "--title", "paid",
+                    "--schedule", "2099-01-01 00:00", "--no-submit",
+                ]
+            )
+
+        self.assertEqual(args.schedule, datetime(2099, 1, 1, 0, 0))
+        self.assertFalse(args.submit)
 
     def _dispatch_args(self, video, config, **overrides):
         values = dict(
@@ -268,11 +271,14 @@ class PaidVideoUiTests(PaidVideoParserTests):
 
     def test_no_submit_returns_prepared_without_finding_publish_button(self):
         app = self._app(submit=False, cdp_url="http://127.0.0.1:9225")
+        app.publish_strategy = DOUYIN_PUBLISH_STRATEGY_SCHEDULED
+        app.publish_date = datetime(2026, 9, 6, 13, 0)
         app.validate_upload_args = AsyncMock()
         app.set_video_file_input = AsyncMock()
         app.set_thumbnail = AsyncMock()
         app.apply_self_declaration = AsyncMock()
         app.fill_title_and_description = AsyncMock()
+        app.set_schedule_time_douyin = AsyncMock()
         app.set_paid_video_settings = AsyncMock(
             return_value={"requested": app.paid_video.to_snapshot(), "observed": {}, "verified": True}
         )
@@ -307,6 +313,7 @@ class PaidVideoUiTests(PaidVideoParserTests):
         self.assertEqual(result["status"], "prepared")
         self.assertFalse(result["submitted"])
         self.assertTrue(result["account_match"])
+        self.assertEqual(result["scheduled_at"], app.publish_date.isoformat())
         page.get_by_role.assert_not_called()
         self.assertTrue(app._upload_succeeded)
 

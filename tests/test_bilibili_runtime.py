@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
+from utils.account_identity import AccountIdentity
 from uploader.bilibili_uploader.runtime import (
     _bilibili_identity_from_observation,
     _exchange_bilibili_web_cookies,
@@ -255,6 +256,9 @@ class BilibiliCdpExportTests(unittest.TestCase):
             "uploader.bilibili_uploader.runtime.async_playwright"
         ) as playwright, patch(
             "uploader.bilibili_uploader.runtime.open_browser_session", new=AsyncMock(return_value=session)
+        ), patch(
+            "uploader.bilibili_uploader.runtime._export_bilibili_direct",
+            new=AsyncMock(side_effect=RuntimeError("direct CDP identity conflict")),
         ):
             playwright.return_value.__aenter__ = AsyncMock(return_value=object())
             playwright.return_value.__aexit__ = AsyncMock(return_value=None)
@@ -263,6 +267,38 @@ class BilibiliCdpExportTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 asyncio.run(export_bilibili_cdp_account("http://127.0.0.1:9225", path, SimpleNamespace(name="managed", port=9225)))
             self.assertEqual(path.read_text(encoding="utf-8"), '{"old": true}')
+
+    def test_export_falls_back_to_direct_cdp_after_patchright_identity_error(self):
+        from types import SimpleNamespace
+
+        nav = {"code": 0, "data": {"isLogin": True, "mid": 518800384, "uname": "creator"}}
+        page = self._page(nav)
+        session = SimpleNamespace(context=self._context(page, []), close=AsyncMock())
+        direct_identity = AccountIdentity(
+            platform="bilibili", logged_in=True, stable_id="518800384",
+            display_name="creator", profile_url="https://space.bilibili.com/518800384",
+            browser_name="managed", cdp_port=9226, extra={"identity_transport": "direct-cdp"},
+        )
+        with tempfile.TemporaryDirectory() as td, patch(
+            "uploader.bilibili_uploader.runtime.async_playwright"
+        ) as playwright, patch(
+            "uploader.bilibili_uploader.runtime.open_browser_session", new=AsyncMock(return_value=session)
+        ), patch(
+            "uploader.bilibili_uploader.runtime._bilibili_identity_from_observation",
+            side_effect=RuntimeError("blocked Bilibili identity: DOM/API UIDs conflict"),
+        ), patch(
+            "uploader.bilibili_uploader.runtime._export_bilibili_direct",
+            new=AsyncMock(return_value=direct_identity),
+        ) as direct_export:
+            playwright.return_value.__aenter__ = AsyncMock(return_value=object())
+            playwright.return_value.__aexit__ = AsyncMock(return_value=None)
+            result = asyncio.run(export_bilibili_cdp_account(
+                "http://127.0.0.1:9226", Path(td) / "account.json",
+                SimpleNamespace(name="managed", port=9226),
+            ))
+
+        self.assertEqual(result.stable_id, "518800384")
+        direct_export.assert_awaited_once()
 
     def test_visible_cached_dom_cannot_override_logged_out_nav(self):
         from types import SimpleNamespace
@@ -281,6 +317,9 @@ class BilibiliCdpExportTests(unittest.TestCase):
             "uploader.bilibili_uploader.runtime.async_playwright"
         ) as playwright, patch(
             "uploader.bilibili_uploader.runtime.open_browser_session", new=AsyncMock(return_value=session)
+        ), patch(
+            "uploader.bilibili_uploader.runtime._export_bilibili_direct",
+            new=AsyncMock(side_effect=RuntimeError("direct CDP identity conflict")),
         ):
             playwright.return_value.__aenter__ = AsyncMock(return_value=object())
             playwright.return_value.__aexit__ = AsyncMock(return_value=None)
@@ -365,6 +404,9 @@ class BilibiliCdpExportTests(unittest.TestCase):
             "uploader.bilibili_uploader.runtime.async_playwright"
         ) as playwright, patch(
             "uploader.bilibili_uploader.runtime.open_browser_session", new=AsyncMock(return_value=session)
+        ), patch(
+            "uploader.bilibili_uploader.runtime._export_bilibili_direct",
+            new=AsyncMock(side_effect=RuntimeError("direct CDP identity conflict")),
         ):
             playwright.return_value.__aenter__ = AsyncMock(return_value=object())
             playwright.return_value.__aexit__ = AsyncMock(return_value=None)

@@ -275,6 +275,22 @@ sau douyin upload-video \
   --task-id douyin-demo-001
 ```
 
+普通视频也可以只上传并设置预约时间、在最终发布前停止：
+
+```bash
+sau douyin upload-video \
+  --account sau9225 \
+  --file videos/demo.mp4 \
+  --title "定时预提交测试" \
+  --schedule "2030-01-01 20:00" \
+  --no-submit \
+  --browser 9225 \
+  --target-account 202851389 \
+  --task-id douyin-schedule-nosubmit-001
+```
+
+抖音普通视频的成功回执为 `status=prepared`、`submitted=false`，并在预约设置通过最终输入框回读后返回 ISO 格式的 `scheduled_at`。定时滚轮每一步都会回读当前值，按最新值动态纠偏，并要求目标连续两次读到后才算稳定；关闭面板后的最终输入框最多完整重试三次。仍不一致时直接 fail closed，绝不查询或点击发布按钮。
+
 抖音额外支持商品链接、商品标题、合集和图文 BGM。遇到短信验证码挑战会停止自动发布，不读取或猜测验证码。
 付费视频使用 Peach 单个 `publishTarget` JSON，通过 `--paid-target-config` 传入；不要传整个 job。示例：
 
@@ -325,17 +341,23 @@ sau douyin upload-video \
 - `subtitleModeText` 第一版只接受 `使用成片内已有双语字幕`。抖音发布页没有对应字幕控件，因此该字段只做输入校验并在结果的 `validated_only` 中回显，不伪装成 UI 回读值；`collectionId` 同理必须为 `null`。
 - `coverModeText` 为 `更改封面` 时，`coverAssetRef` 必须是存在的本地图片；`collectionId` 必须为 `null`，付费视频不能同时使用 `--collection`。
 - `enabled=false` 不展开或修改付费控件，但会确认页面总开关确实关闭；若页面残留为开启状态则阻止发布。开启付费时必须确认协议，设置后会连续回读两次，任一次不一致都 fail closed。
-- `--no-submit` 与 `--schedule` 互斥；成功返回 `status=prepared`、`submitted=false`。不传付费配置时，原有免费上传行为不变。
+- 抖音普通视频允许同时使用 `--schedule` 与 `--no-submit`；成功返回 `status=prepared`、`submitted=false` 和已验证的 `scheduled_at`。不传付费配置时，原有免费上传行为不变。
 
 
 ### Bilibili
 
 ```bash
-sau bilibili check --account sau9225 --browser 9225
-sau bilibili identity --account sau9225 --browser 9225
+export SAU_BILIBILI_ACCOUNT_DIR="/absolute/path/to/bilibili-accounts"
+
+# Only for first bootstrap or recovery after renew fails.
+sau bilibili login --account shuimitao-english --browser 9226
+
+# Routine check renews the fixed account file without exporting the browser again.
+sau bilibili check --account shuimitao-english
+sau bilibili identity --account shuimitao-english --browser 9226
 
 sau bilibili upload-video \
-  --account sau9225 \
+  --account shuimitao-english \
   --file videos/demo.mp4 \
   --title "示例标题" \
   --desc "示例简介" \
@@ -343,12 +365,10 @@ sau bilibili upload-video \
   --tags "英语,听力" \
   --thumbnail covers/bilibili.png \
   --schedule "2030-01-01 20:00" \
-  --browser 9225 \
-  --target-account 526557505 \
   --task-id bilibili-demo-001
 ```
 
-CDP 模式会把当前 Bilibili Web 登录态转换为 biliup 可用的 Bilibili 专用凭证文件，然后校验 MID。首次使用可能需要联网准备 biliup。提交前会检查创作中心近期稿件中的完全同名标题；提交后读回 aid、排期和封面状态。
+`SAU_BILIBILI_ACCOUNT_DIR` 为每个 `--account` 保存一个固定文件 `<account>.json`。只有显式 `login` 会把当前 Bilibili Web 登录态转换为 biliup 凭证；`check` 和 `upload-video` 不重新导出浏览器。每次上传先对固定文件执行 `biliup renew`，失败时返回 `BILIBILI_AUTH_REQUIRED`，并且不会开始上传。首次使用可能需要联网准备 biliup。提交前会检查创作中心近期稿件中的完全同名标题；提交后读回 aid、排期和封面状态。
 
 ### YouTube
 
@@ -405,7 +425,7 @@ sau tencent upload-video --account creator --file videos/demo.mp4 --title "标�
 
 - `--account` 是 SAU 本地账号别名，不一定等于平台昵称或账号 ID。
 - 连接共享 CDP Profile 时，抖音和 YouTube 直接复用该 Profile，不把整个共享上下文导出到单个平台 cookie 文件。
-- Bilibili 是例外：为了调用 biliup，会生成只供 Bilibili 使用的凭证文件，存放在 `cookies/bilibili_ACCOUNT.json`。
+- Bilibili 是例外：为了调用 biliup，会生成只供 Bilibili 使用的凭证文件。设置 `SAU_BILIBILI_ACCOUNT_DIR` 后，文件固定为该目录下的 `<account>.json`，不随 SAU 生产版本目录变化；未设置时保留旧路径 `cookies/bilibili_ACCOUNT.json`。
 - 多浏览器账号路由、`identity` 和 `--target-account` 目前只承诺抖音、YouTube、Bilibili 视频链路。
 - `--task-id` 目前只用于抖音、YouTube、Bilibili 视频上传。
 - YouTube 自定义封面和播放列表属于尽力处理项；平台 UI 不可用时会给出 warning。最终发布按钮不是尽力项，缺失时硬失败。

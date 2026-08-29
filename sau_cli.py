@@ -254,8 +254,15 @@ def resolve_runtime_home() -> Path:
 
 
 def resolve_account_file(platform: str, account_name: str) -> Path:
-    account_file = resolve_runtime_home() / "cookies" / f"{platform}_{account_name}.json"
-    account_file.parent.mkdir(exist_ok=True)
+    if not account_name or account_name in {".", ".."} or Path(account_name).name != account_name or "\\" in account_name:
+        raise ValueError("account name must be a single safe path component")
+    bilibili_dir = os.environ.get("SAU_BILIBILI_ACCOUNT_DIR") if platform == "bilibili" else None
+    account_file = (
+        Path(bilibili_dir).expanduser() / f"{account_name}.json"
+        if bilibili_dir
+        else resolve_runtime_home() / "cookies" / f"{platform}_{account_name}.json"
+    )
+    account_file.parent.mkdir(parents=True, exist_ok=True)
     return account_file
 
 
@@ -519,11 +526,13 @@ async def login_bilibili_account(account_name: str, cdp_url: str | None = None, 
 
 async def check_bilibili_account(account_name: str, cdp_url: str | None = None, target=None) -> bool:
     account_file = resolve_account_file("bilibili", account_name)
+    if not account_file.exists():
+        return False
     expected = None
     if cdp_url:
-        expected = await export_bilibili_cdp_account(cdp_url, account_file, target)
-    elif not account_file.exists():
-        return False
+        expected = await get_bilibili_cdp_identity(cdp_url, target)
+        require_publish_identity(expected)
+        assert_same_publish_identity(expected, read_bilibili_account_identity(account_file, target))
     result = run_biliup_command(["-u", str(account_file), "renew"])
     if result.returncode != 0:
         return False
@@ -815,6 +824,13 @@ async def upload_bilibili_video(request: BilibiliVideoUploadRequest) -> dict:
             f"Bilibili account file is missing: {account_file}. Run `sau bilibili login --account {request.account_name}` first."
         )
 
+    renewed = run_biliup_command(["-u", str(account_file), "renew"])
+    if renewed.returncode != 0:
+        raise RuntimeError(
+            "BILIBILI_AUTH_REQUIRED: fixed biliup account could not be renewed; "
+            "refresh it once from the matching browser before upload"
+        )
+
     try:
         credential_identity = read_bilibili_account_identity(account_file)
     except RuntimeError:
@@ -1039,13 +1055,12 @@ def build_parser() -> argparse.ArgumentParser:
     upload_video_parser.add_argument("--title", required=True, help="Video title")
     upload_video_parser.add_argument("--desc", default="", help="Optional video description")
     upload_video_parser.add_argument("--tags", default="", help="Comma-separated tags, such as tag1,tag2")
-    douyin_submission_group = upload_video_parser.add_mutually_exclusive_group()
-    douyin_submission_group.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
-    douyin_submission_group.add_argument(
+    upload_video_parser.add_argument("--schedule", type=schedule_value, help=f"Schedule time in {schedule_help}")
+    upload_video_parser.add_argument(
         "--no-submit",
         dest="submit",
         action="store_false",
-        help="Fill paid-video controls and metadata then stop before final publish",
+        help="Fill metadata and schedule then stop before final publish",
     )
     upload_video_parser.add_argument(
         "--paid-target-config",
@@ -1538,12 +1553,11 @@ async def dispatch(args: argparse.Namespace) -> int:
             return 0 if identity.logged_in and identity.stable_id else 1
 
         if args.action == "upload-video":
-            exported_identity = None
+            live_identity = None
             if getattr(args, "cdp_url", None):
-                account_file = resolve_account_file("bilibili", args.account)
-                exported_identity = await export_bilibili_cdp_account(args.cdp_url, account_file, target)
-                require_publish_identity(exported_identity)
-                if getattr(args, "target_account", None) and not identity_matches(exported_identity, args.target_account):
+                live_identity = await get_bilibili_cdp_identity(args.cdp_url, target)
+                require_publish_identity(live_identity)
+                if getattr(args, "target_account", None) and not identity_matches(live_identity, args.target_account):
                     raise RuntimeError("blocked publish identity: target account does not match Bilibili page")
             request = BilibiliVideoUploadRequest(
                 account_name=args.account,
@@ -1561,8 +1575,8 @@ async def dispatch(args: argparse.Namespace) -> int:
                 cdp_port=target.port if target else None,
                 target_account=getattr(args, "target_account", None),
                 focus_fallback_used=bool(
-                    exported_identity
-                    and exported_identity.extra.get("focus_fallback_used")
+                    live_identity
+                    and live_identity.extra.get("focus_fallback_used")
                 ),
             )
             result = await upload_bilibili_video(request)

@@ -431,8 +431,13 @@ async def export_bilibili_cdp_account(cdp_url: str, account_file: Path, target=N
                 return result
             finally:
                 await session.close(success=export_success)
-    except RuntimeError:
-        raise
+    except RuntimeError as exc:
+        if "DOM/API UIDs conflict" not in str(exc):
+            raise
+        try:
+            return await _export_bilibili_direct(cdp_url, account_path, target)
+        except Exception:
+            raise exc
     except Exception as exc:
         raise RuntimeError("Bilibili CDP identity/export failed") from exc
 

@@ -44,6 +44,13 @@ sau douyin upload-video \
   [--thumbnail <image-path>] \
   [--product-link <url>] \
   [--product-title "<title>"] \
+  [--declaration "<label>"] \
+  [--collection "<name>"] \
+  [--paid-target-config <json-path>] \
+  [--no-submit] \
+  [--target-account "<stable-id-or-name>"] \
+  [--task-id "<idempotency-key>"] \
+  [--browser <name-or-port> | --browsers <selectors> | --cdp-url <url>] \
   [--debug] \
   [--headless | --headed]
 ```
@@ -59,6 +66,15 @@ sau douyin upload-video \
   - `--thumbnail`
   - `--product-link`
   - `--product-title`
+  - `--declaration`
+  - `--collection`
+  - `--paid-target-config`
+  - `--no-submit`
+  - `--target-account`
+  - `--task-id`
+  - `--browser`
+  - `--browsers`
+  - `--cdp-url`
   - `--debug`
   - `--headless`
   - `--headed`
@@ -93,6 +109,8 @@ sau douyin upload-note \
 
 - 如果不传 `--schedule`，CLI 使用立即发布
 - 如果传了 `--schedule`，CLI 自动切换为定时发布
+- `upload-video` 允许同时传 `--schedule` 与 `--no-submit`：上传并精确回读排期后返回
+  `status=prepared`、`submitted=false` 和 `scheduled_at`，不会查询或点击最终发布按钮
 - 时间格式为:
 
 ```text
