@@ -438,7 +438,7 @@ async def _click_if_present(page: Page, selector: str, timeout: int = 4000) -> b
 
 
 async def _click_required_final_button(
-    page: Page, action: str, *, timeout_ms: int = 10 * 60 * 1000, poll_ms: int = 2000
+    page: Page, action: str, *, timeout_ms: int = 30 * 60 * 1000, poll_ms: int = 2000
 ) -> None:
     selectors = ["#done-button"]
     if action == "Schedule":
