@@ -289,7 +289,7 @@ sau douyin upload-video \
   --task-id douyin-schedule-nosubmit-001
 ```
 
-抖音普通视频的成功回执为 `status=prepared`、`submitted=false`，并在预约设置通过最终输入框回读后返回 ISO 格式的 `scheduled_at`。定时滚轮每一步都会回读当前值，按最新值动态纠偏，并要求目标连续两次读到后才算稳定；关闭面板后的最终输入框最多完整重试三次。仍不一致时直接 fail closed，绝不查询或点击发布按钮。
+抖音普通视频的成功回执为 `status=prepared`、`submitted=false`，并在预约设置通过最终输入框回读后返回 ISO 格式的 `scheduled_at`。定时滚轮会先自动进入视口，再逐步回读当前值、按最新值动态纠偏，并要求目标连续两次读到后才算稳定；关闭面板后的最终输入框最多完整重试三次。仍不一致时直接 fail closed，绝不查询或点击发布按钮。
 
 抖音额外支持商品链接、商品标题、合集和图文 BGM。遇到短信验证码挑战会停止自动发布，不读取或猜测验证码。
 付费视频使用 Peach 单个 `publishTarget` JSON，通过 `--paid-target-config` 传入；不要传整个 job。示例：

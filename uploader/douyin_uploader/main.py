@@ -622,13 +622,6 @@ class DouYinBaseUploader(BaseVideoUploader):
         wheel = page.locator(f"[class*='{kind_class}']").first
         await wheel.wait_for(state="visible", timeout=6000)
 
-        # 视口中心坐标（滚动目标）
-        box = await wheel.bounding_box()
-        if not box:
-            raise RuntimeError(f"抖音 {wheel_kind} wheel 无边界框")
-        cx = box["x"] + box["width"] / 2
-        cy = box["y"] + box["height"] / 2
-
         async def read_current() -> int:
             current_text = await page.eval_on_selector(
                 f"[class*='{kind_class}'] .semi-scrolllist-item-selected",
@@ -639,8 +632,9 @@ class DouYinBaseUploader(BaseVideoUploader):
         current = await read_current()
         stable_reads = 0
         guard = 0
-        # 把鼠标移到 wheel 中心，确保 wheel 事件落在 wheel 上
-        await page.mouse.move(cx, cy)
+        # hover 会先把控件滚进视口，再把鼠标放到滚轮中心；直接使用
+        # bounding_box 中的视口外坐标会让所有 wheel 事件被浏览器忽略。
+        await wheel.hover(timeout=6000)
         while guard < 80:
             if current == target:
                 stable_reads += 1

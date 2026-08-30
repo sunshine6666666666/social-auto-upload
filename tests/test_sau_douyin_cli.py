@@ -302,6 +302,7 @@ class DouyinScheduleTests(unittest.TestCase):
         page.mouse = SimpleNamespace(wheel=AsyncMock(), move=AsyncMock())
         wheel_locator = MagicMock()
         wheel_locator.wait_for = AsyncMock()
+        wheel_locator.hover = AsyncMock()
         wheel_locator.bounding_box = AsyncMock(return_value={"x": 100, "y": 200, "width": 140, "height": 267})
         # page.locator(sel) returns a locator whose .first resolves to the same async-capable mock
         page.locator = MagicMock(return_value=SimpleNamespace(first=wheel_locator))
@@ -327,7 +328,7 @@ class DouyinScheduleTests(unittest.TestCase):
         asyncio.run(run())
         # read 06 → wheel(1) → read 07 → wheel(2) → read 08 done
         self.assertEqual(page.mouse.wheel.call_count, 2)
-        self.assertTrue(page.mouse.move.called)
+        page.locator.return_value.first.hover.assert_awaited_once_with(timeout=6000)
 
     def test_spin_wheel_to_rolls_backward(self):
         app = self._make_app()
