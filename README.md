@@ -183,7 +183,7 @@ sau bilibili upload-video \
 
 ### 9. Issue #9/#10 相关行为
 
-- YouTube Studio 预约优先点击原生 `#done-button`，兼容中文“预定”；禁用按钮不会被点击。找不到最终按钮时返回 `interaction_required`、`recoverable=true` 以及可提取的草稿 ID/URL，并保留最后现场页；带 `--task-id` 的失败 receipt 不会自动重传。
+- YouTube Studio 预约优先点击原生 `#done-button`，兼容中文“预定”；上传后的处理阶段暂时禁用按钮时会等待其变为可用。最终仍不可用时返回 `interaction_required`、`recoverable=true`、按钮诊断以及可提取的草稿 ID/URL，并保留最后现场页；带 `--task-id` 的失败 receipt 不会自动重传。
 - 抖音本地 CDP 上传的主视频超过 50 MiB 时，首次上传和失败重试都通过现有 `DOM.setFileInputFiles` helper 交给同机 Chrome；小文件和非 CDP 路径保持普通文件输入。
 
 ### 10. 顺序批量任务
@@ -392,7 +392,7 @@ sau youtube upload-video \
   --task-id youtube-demo-001
 ```
 
-YouTube 预约发布会读回 Video ID、预约时间、可见性和处理失败标记；成功回执统一包含 `status=success`、`submitted=true`。找不到最终 Publish/Schedule 按钮会直接报错，不再把“等待手工点击”误报成成功。
+YouTube 预约发布会等待处理阶段释放最终按钮，再读回 Video ID、预约时间、可见性和处理失败标记；成功回执统一包含 `status=success`、`submitted=true`。最终 Publish/Schedule 按钮超时仍不可用时会返回现场诊断，不会把“等待手工点击”误报成成功。
 
 只准备到最终页面而不点击发布：
 

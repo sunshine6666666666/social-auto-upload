@@ -437,16 +437,45 @@ async def _click_if_present(page: Page, selector: str, timeout: int = 4000) -> b
         return False
 
 
-async def _click_required_final_button(page: Page, action: str) -> None:
+async def _click_required_final_button(
+    page: Page, action: str, *, timeout_ms: int = 10 * 60 * 1000, poll_ms: int = 2000
+) -> None:
     selectors = ["#done-button"]
     if action == "Schedule":
         selectors.extend(("button:has-text('预定')", "button:has-text('Schedule')"))
     else:
         selectors.append(f"button:has-text('{action}')")
-    for selector in selectors:
-        if await _click_if_present(page, selector, 15000):
-            return
+    attempts = max(1, (timeout_ms + poll_ms - 1) // poll_ms)
+    click_timeout = max(1, min(500, poll_ms // 4))
+    for attempt in range(attempts):
+        for selector in selectors:
+            if await _click_if_present(page, selector, click_timeout):
+                return
+        if attempt + 1 < attempts:
+            await page.wait_for_timeout(poll_ms)
     raise RuntimeError(f"YouTube Studio did not expose the final {action} button")
+
+
+async def _final_schedule_diagnostics(page: Page) -> dict:
+    diagnostics = {"currentUrl": page.url}
+    try:
+        done = page.locator("#done-button").first
+        diagnostics["doneButton"] = {
+            "count": await done.count(),
+            "visible": await done.is_visible(),
+            "enabled": await done.is_enabled(),
+        }
+    except Exception:
+        diagnostics["doneButton"] = {"count": 0, "visible": False, "enabled": False}
+    try:
+        diagnostics["visibleButtonTexts"] = [
+            text.strip()[:120]
+            for text in await page.locator("ytcp-button, button").all_inner_texts()
+            if text.strip()
+        ][-40:]
+    except Exception:
+        diagnostics["visibleButtonTexts"] = []
+    return diagnostics
 
 
 async def wait_for_schedule_control(page: Page, *, timeout_ms: int = 30 * 60 * 1000, poll_ms: int = 5000) -> None:
@@ -704,6 +733,7 @@ class YouTubeVideo(BaseVideoUploader):
                     "cdp_port": self.cdp_port,
                     "stable_id": expected_identity.stable_id,
                     "focus_fallback_used": session.focus_fallback_used,
+                    "diagnostic": await _final_schedule_diagnostics(page),
                     **draft,
                 }
             await page.locator("ytcp-uploads-dialog").first.wait_for(state="hidden", timeout=20000)

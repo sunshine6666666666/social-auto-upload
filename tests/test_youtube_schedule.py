@@ -270,12 +270,21 @@ class YouTubeScheduleReadbackTests(unittest.TestCase):
         self.assertEqual(host.inner.clicks, 1)
 
     def test_missing_final_button_is_a_hard_failure(self):
+        page = type("Page", (), {"wait_for_timeout": AsyncMock()})()
         with patch(
             "uploader.youtube_uploader.main._click_if_present",
             new=AsyncMock(return_value=False),
         ):
             with self.assertRaisesRegex(RuntimeError, "final Publish button"):
-                asyncio.run(_click_required_final_button(object(), "Publish"))
+                asyncio.run(_click_required_final_button(page, "Publish", timeout_ms=1, poll_ms=1))
+
+    def test_final_schedule_button_waits_until_processing_enables_it(self):
+        page = type("Page", (), {"wait_for_timeout": AsyncMock()})()
+        click = AsyncMock(side_effect=[False, False, False, True])
+        with patch("uploader.youtube_uploader.main._click_if_present", new=click):
+            asyncio.run(_click_required_final_button(page, "Schedule", timeout_ms=2, poll_ms=1))
+        self.assertEqual(click.await_count, 4)
+        page.wait_for_timeout.assert_awaited_once_with(1)
 
     def test_schedule_button_falls_back_to_chinese_yuding(self):
         class Button:
