@@ -557,6 +557,7 @@ async def _configure_scheduled_publication(page: Page, schedule: datetime, timez
     await date_input.fill(f"{local_time.year}年{local_time.month}月{local_time.day}日")
     await date_input.press("Enter")
     await time_input.fill(local_time.strftime("%H:%M"))
+    await time_input.blur()
     youtube_logger.info(_msg("🗓️", f"设置 Studio 原生预约: {local_time.isoformat()}"))
 
 

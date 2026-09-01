@@ -392,7 +392,7 @@ sau youtube upload-video \
   --task-id youtube-demo-001
 ```
 
-YouTube 预约发布会在 30 分钟预算内等待处理或临时重试阶段释放最终按钮，再读回 Video ID、预约时间、可见性和处理失败标记；成功回执统一包含 `status=success`、`submitted=true`。最终 Publish/Schedule 按钮超时仍不可用时会返回现场诊断，不会把“等待手工点击”误报成成功。
+YouTube 预约发布会在时间输入后主动失焦以提交字段，并在 30 分钟预算内等待处理或临时重试阶段释放最终按钮，再读回 Video ID、预约时间、可见性和处理失败标记；成功回执统一包含 `status=success`、`submitted=true`。最终 Publish/Schedule 按钮超时仍不可用时会返回现场诊断，不会把“等待手工点击”误报成成功。
 
 只准备到最终页面而不点击发布：
 

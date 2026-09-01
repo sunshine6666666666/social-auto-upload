@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from uploader.youtube_uploader.main import (
     SCHEDULE_BUTTON_SELECTOR,
+    _configure_scheduled_publication,
     _click_if_present,
     _click_required_final_button,
     _youtube_context_kwargs,
@@ -340,6 +341,23 @@ class YouTubeScheduleReadbackTests(unittest.TestCase):
 
 
 class ScheduleControlWaitTests(unittest.TestCase):
+    def test_schedule_time_blurs_after_fill(self):
+        date_trigger, date_input, time_input = MagicMock(), MagicMock(), MagicMock()
+        for locator in (date_trigger, date_input, time_input):
+            locator.first = locator
+            locator.wait_for = AsyncMock()
+        date_trigger.click = AsyncMock()
+        date_input.fill, date_input.press = AsyncMock(), AsyncMock()
+        time_input.fill, time_input.blur = AsyncMock(), AsyncMock()
+        page = MagicMock()
+        page.locator.side_effect = [date_trigger, date_input, time_input]
+
+        with patch("uploader.youtube_uploader.main.wait_for_schedule_control", new=AsyncMock()):
+            asyncio.run(_configure_scheduled_publication(page, datetime(2099, 9, 1, 16, 0), "Asia/Shanghai"))
+
+        time_input.fill.assert_awaited_once_with("16:00")
+        time_input.blur.assert_awaited_once_with()
+
     def test_schedule_selector_covers_studio_expand_control(self):
         self.assertIn("second-container-expand-button", SCHEDULE_BUTTON_SELECTOR)
 
