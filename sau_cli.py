@@ -1290,9 +1290,8 @@ async def dispatch(args: argparse.Namespace) -> int:
             args.cdp_url = target.cdp_url
 
     if args.platform == "douyin":
-        publish_strategy = DOUYIN_PUBLISH_STRATEGY_SCHEDULED if args.schedule else DOUYIN_PUBLISH_STRATEGY_IMMEDIATE
-
         if args.action == "upload-video":
+            publish_strategy = DOUYIN_PUBLISH_STRATEGY_SCHEDULED if args.schedule else DOUYIN_PUBLISH_STRATEGY_IMMEDIATE
             paid_target_config = getattr(args, "paid_target_config", None)
             paid_video: DouyinPaidVideoSettings | None = None
             if paid_target_config is not None:

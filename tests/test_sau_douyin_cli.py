@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 import sau_cli
 from uploader.douyin_uploader.main import (
     DouYinVideo,
+    _wait_for_douyin_login,
     assert_douyin_publish_identity,
     extract_douyin_identity,
     extract_douyin_identity_from_context,
@@ -23,6 +24,42 @@ class DouyinCliTests(unittest.TestCase):
         video = Path(temp_dir) / name
         video.write_bytes(b"video")
         return video
+
+    def test_login_dispatch_does_not_require_upload_schedule(self):
+        args = sau_cli.build_parser().parse_args(
+            ["douyin", "login", "--account", "peach", "--browser", "9226"]
+        )
+        target = SimpleNamespace(cdp_url="http://127.0.0.1:9226")
+        with patch(
+            "sau_cli._resolve_upload_target", new=AsyncMock(return_value=target)
+        ), patch(
+            "sau_cli.login_douyin_account",
+            new=AsyncMock(return_value={"success": True, "account_file": "/tmp/account.json"}),
+        ) as login, patch("builtins.print"):
+            self.assertEqual(asyncio.run(sau_cli.dispatch(args)), 0)
+        login.assert_awaited_once_with("peach", headless=args.headless, cdp_url=target.cdp_url)
+
+    def test_login_wait_handles_navigation_without_unbound_state(self):
+        class Page:
+            def __init__(self):
+                self._reads = 0
+
+            @property
+            def url(self):
+                self._reads += 1
+                return "https://creator.douyin.com/" if self._reads == 1 else "https://creator.douyin.com/check"
+
+            def locator(self, _selector):
+                return SimpleNamespace(count=AsyncMock(return_value=0))
+
+        with patch(
+            "uploader.douyin_uploader.main._is_douyin_login_completed",
+            new=AsyncMock(return_value=False),
+        ):
+            result = asyncio.run(
+                _wait_for_douyin_login(Page(), "account.json", {}, poll_interval=0, max_checks=1)
+            )
+        self.assertEqual(result["status"], "timeout")
 
     def test_build_parser_defaults_declaration_to_no_declaration(self):
         with tempfile.TemporaryDirectory() as temp_dir:
