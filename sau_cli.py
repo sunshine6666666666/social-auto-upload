@@ -223,6 +223,8 @@ class TencentVideoUploadRequest:
     debug: bool = True
     headless: bool = True
     cdp_url: str | None = None
+    collection_name: str | None = None
+    content_label: str | None = None
 
 
 @dataclass(slots=True)
@@ -543,16 +545,16 @@ async def check_bilibili_account(account_name: str, cdp_url: str | None = None, 
     return True
 
 
-async def login_tencent_account(account_name: str, headless: bool = True) -> dict:
+async def login_tencent_account(account_name: str, headless: bool = True, cdp_url: str | None = None) -> dict:
     account_file = resolve_account_file("tencent", account_name)
-    return await tencent_setup(str(account_file), handle=True, return_detail=True, headless=headless)
+    return await tencent_setup(str(account_file), handle=True, return_detail=True, headless=headless, cdp_url=cdp_url)
 
 
-async def check_tencent_account(account_name: str) -> bool:
+async def check_tencent_account(account_name: str, cdp_url: str | None = None) -> bool:
     account_file = resolve_account_file("tencent", account_name)
     if not account_file.exists():
         return False
-    return await tencent_cookie_auth(str(account_file))
+    return await tencent_cookie_auth(str(account_file), cdp_url=cdp_url)
 
 
 async def login_youtube_account(
@@ -947,11 +949,11 @@ async def upload_bilibili_video(request: BilibiliVideoUploadRequest) -> dict:
 
 async def upload_tencent_video(request: TencentVideoUploadRequest) -> Path:
     account_file = resolve_account_file("tencent", request.account_name)
-    is_ready = await tencent_setup(str(account_file), handle=False)
+    is_ready = await tencent_setup(str(account_file), handle=False, cdp_url=request.cdp_url)
     if not is_ready:
         raise RuntimeError(
             f"Tencent/WeChat Channels cookie is missing or expired: {account_file}. "
-            f"Run `sau tencent login --account {request.account_name}` first."
+            "请先用 wechat-channels-login Skill 恢复并交接登录态，或运行视频号 login 命令。"
         )
 
     app = TencentVideo(
@@ -974,6 +976,9 @@ async def upload_tencent_video(request: TencentVideoUploadRequest) -> Path:
         publish_strategy=request.publish_strategy,
         debug=request.debug,
         headless=request.headless,
+        cdp_url=request.cdp_url,
+        collection_name=request.collection_name,
+        content_label=request.content_label,
     )
     await app.tencent_upload_video()
     return account_file
@@ -1211,8 +1216,7 @@ def build_parser() -> argparse.ArgumentParser:
     for action_name in ("login", "check"):
         action_parser = tencent_actions.add_parser(action_name, help=f"Tencent/WeChat Channels {action_name}")
         action_parser.add_argument("--account", required=True, help="Tencent user-defined account_name")
-        if action_name == "login":
-            add_runtime_flags(action_parser)
+        add_runtime_flags(action_parser)
 
     tencent_upload_video_parser = tencent_actions.add_parser("upload-video", help="Upload one video to WeChat Channels")
     tencent_upload_video_parser.add_argument("--account", required=True, help="Tencent user-defined account_name")
@@ -1226,6 +1230,8 @@ def build_parser() -> argparse.ArgumentParser:
     tencent_upload_video_parser.add_argument("--thumbnail-portrait", type=existing_file_path, help="Optional 3:4 portrait thumbnail path")
     tencent_upload_video_parser.add_argument("--short-title", help="Optional WeChat Channels short title")
     tencent_upload_video_parser.add_argument("--category", help="Optional original content category")
+    tencent_upload_video_parser.add_argument("--collection", help="Exact WeChat Channels collection name")
+    tencent_upload_video_parser.add_argument("--content-label", help="Explicit video annotation label; omitted by default")
     tencent_upload_video_parser.add_argument("--draft", action="store_true", help="Save as draft instead of publishing")
     add_runtime_flags(tencent_upload_video_parser)
 
@@ -1604,14 +1610,14 @@ async def dispatch(args: argparse.Namespace) -> int:
 
     if args.platform == "tencent":
         if args.action == "login":
-            result = await login_tencent_account(args.account, headless=args.headless)
+            result = await login_tencent_account(args.account, headless=args.headless, cdp_url=getattr(args, "cdp_url", None))
             if not result["success"]:
                 raise RuntimeError(result["message"])
             print(f"Tencent/WeChat Channels login flow completed: {result['account_file']}")
             return 0
 
         if args.action == "check":
-            is_valid = await check_tencent_account(args.account)
+            is_valid = await check_tencent_account(args.account, cdp_url=getattr(args, "cdp_url", None))
             print("valid" if is_valid else "invalid")
             return 0 if is_valid else 1
 
@@ -1629,6 +1635,8 @@ async def dispatch(args: argparse.Namespace) -> int:
                 thumbnail_landscape_file=args.thumbnail_landscape,
                 thumbnail_portrait_file=args.thumbnail_portrait,
                 short_title=args.short_title,
+                collection_name=getattr(args, "collection", None),
+                content_label=getattr(args, "content_label", None),
                 category=args.category,
                 is_draft=args.draft,
                 publish_strategy=publish_strategy,
